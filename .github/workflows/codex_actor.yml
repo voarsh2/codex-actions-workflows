@@ -1,0 +1,598 @@
+name: Codex Actor
+
+on:
+  workflow_call:
+    inputs:
+      event_name:
+        required: true
+        type: string
+      repository_owner:
+        required: true
+        type: string
+      repository_name:
+        required: true
+        type: string
+      repository_full_name:
+        required: true
+        type: string
+      default_branch:
+        required: true
+        type: string
+      actor:
+        required: true
+        type: string
+      sender_type:
+        required: true
+        type: string
+      author_association:
+        required: true
+        type: string
+      comment_body:
+        required: true
+        type: string
+      issue_number:
+        required: true
+        type: number
+      is_pull_request:
+        required: false
+        type: boolean
+        default: false
+      pull_request_number:
+        required: false
+        type: number
+        default: 0
+      bot_branch_prefix:
+        required: false
+        type: string
+        default: codex/issue
+      model:
+        required: false
+        type: string
+        default: ""
+      effort:
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        required: false
+        type: boolean
+        default: false
+      allow_users:
+        required: false
+        type: string
+        default: ""
+      deny_untrusted:
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      codex_api_key:
+        required: true
+      codex_responses_api_endpoint:
+        required: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      should_run: ${{ steps.compute.outputs.should_run }}
+      should_reply: ${{ steps.compute.outputs.should_reply }}
+      skip_reason: ${{ steps.compute.outputs.skip_reason }}
+      command_text: ${{ steps.compute.outputs.command_text }}
+      mode: ${{ steps.compute.outputs.mode }}
+      reply_number: ${{ steps.compute.outputs.reply_number }}
+      checkout_ref: ${{ steps.compute.outputs.checkout_ref }}
+      push_ref: ${{ steps.compute.outputs.push_ref }}
+      bot_branch: ${{ steps.compute.outputs.bot_branch }}
+      target_number: ${{ steps.compute.outputs.target_number }}
+      default_branch: ${{ steps.compute.outputs.default_branch }}
+      issue_title: ${{ steps.compute.outputs.issue_title }}
+    steps:
+      - id: compute
+        name: Compute command context
+        uses: actions/github-script@v7
+        env:
+          INPUT_EVENT_NAME: ${{ inputs.event_name }}
+          INPUT_REPOSITORY_OWNER: ${{ inputs.repository_owner }}
+          INPUT_REPOSITORY_NAME: ${{ inputs.repository_name }}
+          INPUT_ACTOR: ${{ inputs.actor }}
+          INPUT_SENDER_TYPE: ${{ inputs.sender_type }}
+          INPUT_AUTHOR_ASSOCIATION: ${{ inputs.author_association }}
+          INPUT_COMMENT_BODY: ${{ inputs.comment_body }}
+          INPUT_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          INPUT_IS_PULL_REQUEST: ${{ inputs.is_pull_request }}
+          INPUT_PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
+          INPUT_DEFAULT_BRANCH: ${{ inputs.default_branch }}
+          INPUT_BOT_BRANCH_PREFIX: ${{ inputs.bot_branch_prefix }}
+          INPUT_ALLOW_USERS: ${{ inputs.allow_users }}
+          INPUT_DENY_UNTRUSTED: ${{ inputs.deny_untrusted }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const core = require("@actions/core");
+
+            const owner = process.env.INPUT_REPOSITORY_OWNER;
+            const repo = process.env.INPUT_REPOSITORY_NAME;
+            const actor = process.env.INPUT_ACTOR;
+            const senderType = (process.env.INPUT_SENDER_TYPE || "").toLowerCase();
+            const association = (process.env.INPUT_AUTHOR_ASSOCIATION || "").toUpperCase();
+            const body = process.env.INPUT_COMMENT_BODY || "";
+            const issueNumber = Number(process.env.INPUT_ISSUE_NUMBER || "0");
+            const pullNumber = Number(process.env.INPUT_PULL_REQUEST_NUMBER || "0");
+            const isPullRequest = (process.env.INPUT_IS_PULL_REQUEST || "false").toLowerCase() === "true" || process.env.INPUT_EVENT_NAME === "pull_request_review_comment";
+            const defaultBranch = process.env.INPUT_DEFAULT_BRANCH || "main";
+            const denyUntrusted = (process.env.INPUT_DENY_UNTRUSTED || "true").toLowerCase() === "true";
+            const allowUsers = (process.env.INPUT_ALLOW_USERS || "")
+              .split(",")
+              .map((entry) => entry.trim().toLowerCase())
+              .filter(Boolean);
+            const trustedAssociations = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+            const isTrusted = trustedAssociations.has(association) || allowUsers.includes("*") || allowUsers.includes(actor.toLowerCase());
+            const isBot = senderType === "bot" || actor.endsWith("[bot]");
+            const summonMatch = body.match(/(?:^|\s)(@codex|\/codex)\b([\s\S]*)/i);
+            const set = (name, value) => core.setOutput(name, value == null ? "" : String(value));
+
+            set("default_branch", defaultBranch);
+            set("reply_number", issueNumber);
+            set("target_number", issueNumber);
+            set("mode", isPullRequest ? "pr" : "issue");
+            set("checkout_ref", defaultBranch);
+            set("push_ref", "");
+            set("bot_branch", "");
+            set("issue_title", "");
+
+            if (isBot) {
+              set("should_run", "false");
+              set("should_reply", "false");
+              set("skip_reason", "bot_comment");
+              return;
+            }
+
+            if (!summonMatch) {
+              set("should_run", "false");
+              set("should_reply", "false");
+              set("skip_reason", "no_summon");
+              return;
+            }
+
+            const commandText = (summonMatch[2] || "").trim();
+            set("command_text", commandText);
+
+            if (!commandText) {
+              set("should_run", "false");
+              set("should_reply", "true");
+              set("skip_reason", "empty_command");
+              return;
+            }
+
+            if (!isTrusted) {
+              set("should_run", "false");
+              set("should_reply", denyUntrusted ? "true" : "false");
+              set("skip_reason", "untrusted");
+              return;
+            }
+
+            if (isPullRequest) {
+              const { data: pull } = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: pullNumber || issueNumber,
+              });
+
+              set("reply_number", pull.number);
+              set("target_number", pull.number);
+              set("issue_title", pull.title || "");
+              set("checkout_ref", pull.head.ref);
+              set("push_ref", pull.head.ref);
+
+              const sameRepo = pull.head.repo.full_name.toLowerCase() === `${owner}/${repo}`.toLowerCase();
+              if (!sameRepo) {
+                set("should_run", "false");
+                set("should_reply", "true");
+                set("skip_reason", "fork_pr_unsupported");
+                return;
+              }
+            } else {
+              const { data: issue } = await github.rest.issues.get({
+                owner,
+                repo,
+                issue_number: issueNumber,
+              });
+              const prefix = (process.env.INPUT_BOT_BRANCH_PREFIX || "codex/issue")
+                .replace(/[^A-Za-z0-9._\/-]+/g, "-")
+                .replace(/\/{2,}/g, "/")
+                .replace(/^-+|-+$/g, "") || "codex/issue";
+              const branch = `${prefix}-${issueNumber}`;
+
+              set("issue_title", issue.title || "");
+              set("bot_branch", branch);
+              set("push_ref", branch);
+            }
+
+            set("should_run", "true");
+            set("should_reply", "true");
+            set("skip_reason", "");
+
+  act:
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: needs.prepare.outputs.should_run == 'true'
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      run_status: ${{ steps.finalize.outputs.run_status }}
+      final_message: ${{ steps.finalize.outputs.final_message }}
+      changed: ${{ steps.finalize.outputs.changed }}
+      changed_files: ${{ steps.finalize.outputs.changed_files }}
+      commit_sha: ${{ steps.finalize.outputs.commit_sha }}
+      pr_url: ${{ steps.finalize.outputs.pr_url }}
+      pr_number: ${{ steps.finalize.outputs.pr_number }}
+    steps:
+      - name: Checkout target ref
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
+          fetch-depth: 0
+
+      - id: issue_branch
+        name: Prepare issue branch
+        if: needs.prepare.outputs.mode == 'issue'
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ needs.prepare.outputs.default_branch }}
+          BOT_BRANCH: ${{ needs.prepare.outputs.bot_branch }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin "$BOT_BRANCH" >/dev/null 2>&1; then
+            echo "branch_exists=true" >> "$GITHUB_OUTPUT"
+            git fetch --no-tags origin "$BOT_BRANCH"
+            git checkout -B "$BOT_BRANCH" FETCH_HEAD
+          else
+            echo "branch_exists=false" >> "$GITHUB_OUTPUT"
+            git fetch --no-tags origin "$DEFAULT_BRANCH"
+            git checkout -B "$BOT_BRANCH" "refs/remotes/origin/$DEFAULT_BRANCH"
+          fi
+
+      - id: prompt
+        name: Build Codex prompt
+        uses: actions/github-script@v7
+        env:
+          MODE: ${{ needs.prepare.outputs.mode }}
+          OWNER: ${{ inputs.repository_owner }}
+          REPO: ${{ inputs.repository_name }}
+          TARGET_NUMBER: ${{ needs.prepare.outputs.target_number }}
+          COMMAND_TEXT: ${{ needs.prepare.outputs.command_text }}
+          DEFAULT_BRANCH: ${{ needs.prepare.outputs.default_branch }}
+          PUSH_REF: ${{ needs.prepare.outputs.push_ref }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require("fs");
+            const mode = process.env.MODE;
+            const owner = process.env.OWNER;
+            const repo = process.env.REPO;
+            const targetNumber = Number(process.env.TARGET_NUMBER);
+            const commandText = process.env.COMMAND_TEXT;
+            const pushRef = process.env.PUSH_REF;
+            let title = "";
+            let body = "";
+
+            if (mode === "pr") {
+              const { data: pull } = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: targetNumber,
+              });
+              title = pull.title || "";
+              body = pull.body || "";
+            } else {
+              const { data: issue } = await github.rest.issues.get({
+                owner,
+                repo,
+                issue_number: targetNumber,
+              });
+              title = issue.title || "";
+              body = issue.body || "";
+            }
+
+            const prompt = [
+              "You are running inside GitHub Actions as a repository actor.",
+              "",
+              `Repository: ${owner}/${repo}`,
+              `Context: ${mode === "pr" ? "pull request" : "issue"} #${targetNumber}`,
+              `Working branch: ${pushRef || process.env.DEFAULT_BRANCH}`,
+              "",
+              "User instruction:",
+              commandText,
+              "",
+              `${mode === "pr" ? "Pull request" : "Issue"} title:`,
+              title || "(empty)",
+              "",
+              `${mode === "pr" ? "Pull request" : "Issue"} body:`,
+              body || "(empty)",
+              "",
+              "Requirements:",
+              "- Make only the code or documentation changes needed to satisfy the instruction.",
+              "- Do not run git commit or git push. The workflow handles persistence.",
+              "- If no file changes are needed, explain that clearly in the final message.",
+              "- End with a concise summary of what changed and any tests or checks you ran.",
+            ].join("\n");
+
+            fs.writeFileSync("codex-actor-prompt.md", prompt);
+
+      - id: run_codex
+        name: Run Codex
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.codex_api_key }}
+          responses-api-endpoint: ${{ secrets.codex_responses_api_endpoint }}
+          prompt-file: codex-actor-prompt.md
+          sandbox: workspace-write
+          model: ${{ inputs.model }}
+          effort: ${{ inputs.effort }}
+          allow-users: ${{ inputs.allow_users }}
+
+      - id: scan_changes
+        name: Scan working tree changes
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$(git status --short)" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "changed_files<<EOF"
+              git status --short
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "changed_files<<EOF"
+              echo "No tracked changes."
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: commit_push
+        name: Commit and push changes
+        if: always() && steps.run_codex.outcome == 'success' && steps.scan_changes.outputs.changed == 'true' && inputs.dry_run == false
+        shell: bash
+        env:
+          PUSH_REF: ${{ needs.prepare.outputs.push_ref }}
+          MODE: ${{ needs.prepare.outputs.mode }}
+          TARGET_NUMBER: ${{ needs.prepare.outputs.target_number }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "codex: apply request from ${MODE} #${TARGET_NUMBER}"
+          git push origin "HEAD:${PUSH_REF}"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - id: ensure_issue_pr
+        name: Create or update issue PR
+        if: always() && needs.prepare.outputs.mode == 'issue'
+        uses: actions/github-script@v7
+        env:
+          OWNER: ${{ inputs.repository_owner }}
+          REPO: ${{ inputs.repository_name }}
+          DEFAULT_BRANCH: ${{ needs.prepare.outputs.default_branch }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          BRANCH_NAME: ${{ needs.prepare.outputs.bot_branch }}
+          ISSUE_TITLE: ${{ needs.prepare.outputs.issue_title }}
+          BRANCH_EXISTS: ${{ steps.issue_branch.outputs.branch_exists }}
+          COMMIT_PUSH_OUTCOME: ${{ steps.commit_push.outcome }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const core = require("@actions/core");
+            const owner = process.env.OWNER;
+            const repo = process.env.REPO;
+            const issueNumber = Number(process.env.ISSUE_NUMBER);
+            const branchName = process.env.BRANCH_NAME;
+            const defaultBranch = process.env.DEFAULT_BRANCH;
+            const issueTitle = process.env.ISSUE_TITLE || `Issue ${issueNumber}`;
+            const branchExists = (process.env.BRANCH_EXISTS || "false") === "true";
+            const commitPushed = process.env.COMMIT_PUSH_OUTCOME === "success";
+            const dryRun = (process.env.DRY_RUN || "false") === "true";
+
+            core.setOutput("pr_url", "");
+            core.setOutput("pr_number", "");
+
+            if (dryRun || (!branchExists && !commitPushed)) {
+              return;
+            }
+
+            const { data: pulls } = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: "open",
+              head: `${owner}:${branchName}`,
+              base: defaultBranch,
+              per_page: 1,
+            });
+
+            if (pulls.length > 0) {
+              core.setOutput("pr_url", pulls[0].html_url);
+              core.setOutput("pr_number", String(pulls[0].number));
+              return;
+            }
+
+            const { data: pull } = await github.rest.pulls.create({
+              owner,
+              repo,
+              title: `Codex: ${issueTitle}`.slice(0, 240),
+              head: branchName,
+              base: defaultBranch,
+              body: `Automated Codex changes for #${issueNumber}.\n\nRefs #${issueNumber}.`,
+            });
+
+            core.setOutput("pr_url", pull.html_url);
+            core.setOutput("pr_number", String(pull.number));
+
+      - id: finalize
+        name: Collect actor outputs
+        if: always()
+        shell: bash
+        env:
+          MODE: ${{ needs.prepare.outputs.mode }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          CODEX_OUTCOME: ${{ steps.run_codex.outcome }}
+          CHANGED: ${{ steps.scan_changes.outputs.changed }}
+          COMMIT_OUTCOME: ${{ steps.commit_push.outcome }}
+          ISSUE_PR_OUTCOME: ${{ steps.ensure_issue_pr.outcome }}
+          FINAL_MESSAGE: ${{ steps.run_codex.outputs.final-message }}
+          CHANGED_FILES: ${{ steps.scan_changes.outputs.changed_files }}
+          COMMIT_SHA: ${{ steps.commit_push.outputs.commit_sha }}
+          PR_URL: ${{ steps.ensure_issue_pr.outputs.pr_url }}
+          PR_NUMBER: ${{ steps.ensure_issue_pr.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          status="success"
+
+          if [[ "$CODEX_OUTCOME" != "success" ]]; then
+            status="codex_failed"
+          elif [[ "$CHANGED" != "true" ]]; then
+            status="no_changes"
+          elif [[ "$DRY_RUN" == "true" ]]; then
+            status="dry_run"
+          elif [[ -n "$COMMIT_OUTCOME" && "$COMMIT_OUTCOME" != "success" ]]; then
+            status="push_failed"
+          elif [[ "$MODE" == "issue" && -n "$ISSUE_PR_OUTCOME" && "$ISSUE_PR_OUTCOME" != "success" ]]; then
+            status="pr_failed"
+          fi
+
+          {
+            echo "run_status=$status"
+            echo "changed=$CHANGED"
+            echo "commit_sha=$COMMIT_SHA"
+            echo "pr_url=$PR_URL"
+            echo "pr_number=$PR_NUMBER"
+            echo "final_message<<EOF"
+            printf '%s\n' "$FINAL_MESSAGE"
+            echo "EOF"
+            echo "changed_files<<EOF"
+            printf '%s\n' "$CHANGED_FILES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Fail workflow on actor error
+        if: always() && contains('codex_failed,push_failed,pr_failed', steps.finalize.outputs.run_status)
+        shell: bash
+        run: |
+          echo "Actor run ended with status: ${{ steps.finalize.outputs.run_status }}"
+          exit 1
+
+  reply:
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - act
+    if: always() && needs.prepare.outputs.should_reply == 'true'
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Post result comment
+        uses: actions/github-script@v7
+        env:
+          OWNER: ${{ inputs.repository_owner }}
+          REPO: ${{ inputs.repository_name }}
+          ACTOR: ${{ inputs.actor }}
+          MODE: ${{ needs.prepare.outputs.mode }}
+          REPLY_NUMBER: ${{ needs.prepare.outputs.reply_number }}
+          SKIP_REASON: ${{ needs.prepare.outputs.skip_reason }}
+          COMMAND_TEXT: ${{ needs.prepare.outputs.command_text }}
+          RUN_STATUS: ${{ needs.act.outputs.run_status }}
+          FINAL_MESSAGE: ${{ needs.act.outputs.final_message }}
+          CHANGED: ${{ needs.act.outputs.changed }}
+          CHANGED_FILES: ${{ needs.act.outputs.changed_files }}
+          COMMIT_SHA: ${{ needs.act.outputs.commit_sha }}
+          PR_URL: ${{ needs.act.outputs.pr_url }}
+          PR_NUMBER: ${{ needs.act.outputs.pr_number }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const owner = process.env.OWNER;
+            const repo = process.env.REPO;
+            const actor = process.env.ACTOR;
+            const replyNumber = Number(process.env.REPLY_NUMBER);
+            const mode = process.env.MODE;
+            const skipReason = process.env.SKIP_REASON;
+            const commandText = process.env.COMMAND_TEXT || "";
+            const runStatus = process.env.RUN_STATUS || "";
+            const finalMessage = process.env.FINAL_MESSAGE || "";
+            const changed = process.env.CHANGED === "true";
+            const changedFiles = process.env.CHANGED_FILES || "No tracked changes.";
+            const commitSha = process.env.COMMIT_SHA || "";
+            const prUrl = process.env.PR_URL || "";
+            const prNumber = process.env.PR_NUMBER || "";
+            const dryRun = process.env.DRY_RUN === "true";
+
+            let body = "";
+
+            if (skipReason === "untrusted") {
+              body = `@${actor} this workflow only accepts \`@codex\` or \`/codex\` commands from trusted collaborators.`;
+            } else if (skipReason === "empty_command") {
+              body = `@${actor} include an instruction after \`@codex\` or \`/codex\` so I know what to do.`;
+            } else if (skipReason === "fork_pr_unsupported") {
+              body = `@${actor} this PR comes from a fork, so v1 will not try to push to the contributor branch from this workflow.`;
+            } else {
+              const statusLine = {
+                success: "Completed the requested run.",
+                no_changes: "Ran successfully and did not need to change tracked files.",
+                dry_run: "Dry run complete. Changes were produced but not committed.",
+                codex_failed: "Codex did not complete successfully.",
+                push_failed: "Codex finished, but committing or pushing changes failed.",
+                pr_failed: "Codex finished and changes were pushed, but PR creation or lookup failed.",
+              }[runStatus || "success"] || "Run finished.";
+
+              const parts = [
+                `@${actor} ${statusLine}`,
+                "",
+                `Mode: \`${mode}\``,
+                `Changed files: ${changed ? "yes" : "no"}`,
+                `Dry run: ${dryRun ? "yes" : "no"}`,
+              ];
+
+              if (commitSha) {
+                parts.push(`Commit: \`${commitSha}\``);
+              }
+              if (prUrl) {
+                parts.push(`PR: #${prNumber} (${prUrl})`);
+              }
+
+              parts.push("");
+              parts.push("Requested command:");
+              parts.push("```text");
+              parts.push(commandText);
+              parts.push("```");
+              parts.push("");
+              parts.push("Codex summary:");
+              parts.push(finalMessage || "_No final message returned._");
+              parts.push("");
+              parts.push("Tracked changes detected before persistence:");
+              parts.push("```text");
+              parts.push(changedFiles);
+              parts.push("```");
+
+              body = parts.join("\n");
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: replyNumber,
+              body,
+            });

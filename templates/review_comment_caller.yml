@@ -1,0 +1,39 @@
+name: Codex from review comments
+
+on:
+  pull_request_review_comment:
+    types:
+      - created
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  codex_actor:
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    uses: YOUR_ORG/codex-actions-workflows/.github/workflows/codex_actor.yml@YOUR_REUSABLE_REF
+    with:
+      event_name: pull_request_review_comment
+      repository_owner: ${{ github.repository_owner }}
+      repository_name: ${{ github.event.repository.name }}
+      repository_full_name: ${{ github.repository }}
+      default_branch: ${{ github.event.repository.default_branch }}
+      actor: ${{ github.actor }}
+      sender_type: ${{ github.event.sender.type }}
+      author_association: ${{ github.event.comment.author_association }}
+      comment_body: ${{ github.event.comment.body }}
+      issue_number: ${{ github.event.pull_request.number }}
+      is_pull_request: true
+      pull_request_number: ${{ github.event.pull_request.number }}
+      bot_branch_prefix: codex/issue
+      dry_run: false
+      allow_users: ""
+      deny_untrusted: true
+    secrets:
+      codex_api_key: ${{ secrets.CODEX_API_KEY }}
+      codex_responses_api_endpoint: ${{ secrets.CODEX_RESPONSES_API_ENDPOINT }}
