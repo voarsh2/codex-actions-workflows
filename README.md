@@ -25,10 +25,6 @@ The reusable workflow expects these secret names in the target project:
 - `CODEX_API_KEY`: bearer key for your Claw Bay or other Responses-compatible endpoint.
 - `CODEX_BASE_URL`: preferred provider base URL, for example `https://api.example.com/backend-api/codex`.
 
-Legacy compatibility:
-
-- `CODEX_RESPONSES_API_ENDPOINT`: optional fallback if you still have the old secret name. The workflow will derive `CODEX_BASE_URL` by stripping a trailing `/responses`.
-
 Use repository secrets or environment secrets in the caller repo. The reusable workflow reads `${{ secrets.* }}` from the calling workflow context.
 
 ## Required caller permissions
