@@ -232,11 +232,11 @@ jobs:
       issues: write
       pull-requests: write
     outputs:
-      run_status: ${{ steps.finalize.outputs.run_status }}
-      final_message: ${{ steps.finalize.outputs.final_message }}
-      changed: ${{ steps.finalize.outputs.changed }}
-      changed_files: ${{ steps.finalize.outputs.changed_files }}
-      commit_sha: ${{ steps.finalize.outputs.commit_sha }}
+      run_status: ${{ steps.status.outputs.run_status }}
+      final_message: ${{ steps.capture_codex.outputs.final_message }}
+      changed: ${{ steps.scan_changes.outputs.changed }}
+      changed_files: ${{ steps.scan_changes.outputs.changed_files }}
+      commit_sha: ${{ steps.commit_push.outputs.commit_sha }}
       pr_url: ${{ steps.ensure_issue_pr.outputs.pr_url }}
       pr_number: ${{ steps.ensure_issue_pr.outputs.pr_number }}
       pr_error: ${{ steps.ensure_issue_pr.outputs.pr_error }}
@@ -298,16 +298,19 @@ jobs:
           COMMAND_TEXT: ${{ needs.prepare.outputs.command_text }}
           DEFAULT_BRANCH: ${{ needs.prepare.outputs.default_branch }}
           PUSH_REF: ${{ needs.prepare.outputs.push_ref }}
+          RUNNER_TEMP: ${{ runner.temp }}
         with:
           github-token: ${{ github.token }}
           script: |
             const fs = require("fs");
+            const path = require("path");
             const mode = process.env.MODE;
             const owner = process.env.OWNER;
             const repo = process.env.REPO;
             const targetNumber = Number(process.env.TARGET_NUMBER);
             const commandText = process.env.COMMAND_TEXT;
             const pushRef = process.env.PUSH_REF;
+            const outputDir = path.join(process.env.RUNNER_TEMP, "codex-actor");
             let title = "";
             let body = "";
 
@@ -352,12 +355,17 @@ jobs:
               "- End with a concise summary of what changed and any tests or checks you ran.",
             ].join("\n");
 
-            fs.writeFileSync("codex-actor-prompt.md", prompt);
+            fs.mkdirSync(outputDir, { recursive: true });
+            const promptPath = path.join(outputDir, "codex-actor-prompt.md");
+            const finalMessagePath = path.join(outputDir, "codex-final-message.txt");
+            fs.writeFileSync(promptPath, prompt);
+            core.setOutput("prompt_path", promptPath);
+            core.setOutput("final_message_path", finalMessagePath);
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
 
       - id: install_codex
         name: Install Codex CLI
@@ -413,35 +421,33 @@ jobs:
         env:
           CODEX_HOME: ${{ steps.write_config.outputs.codex_home }}
           MODEL: ${{ inputs.model }}
+          PROMPT_PATH: ${{ steps.prompt.outputs.prompt_path }}
+          FINAL_MESSAGE_PATH: ${{ steps.prompt.outputs.final_message_path }}
         run: |
           set -euo pipefail
           codex exec \
             --skip-git-repo-check \
             --sandbox workspace-write \
             --model "$MODEL" \
-            --output-last-message codex-final-message.txt \
-            - < codex-actor-prompt.md
+            --output-last-message "$FINAL_MESSAGE_PATH" \
+            - < "$PROMPT_PATH"
 
       - id: capture_codex
         name: Capture Codex output
         if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          delimiter="CODEX_FINAL_$(date +%s%N)"
-          if [[ -f codex-final-message.txt ]]; then
-            {
-              echo "final_message<<$delimiter"
-              cat codex-final-message.txt
-              echo "$delimiter"
-            } >> "$GITHUB_OUTPUT"
-          else
-            {
-              echo "final_message<<$delimiter"
-              echo ""
-              echo "$delimiter"
-            } >> "$GITHUB_OUTPUT"
-          fi
+        uses: actions/github-script@v8
+        env:
+          FINAL_MESSAGE_PATH: ${{ steps.prompt.outputs.final_message_path }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require("fs");
+            const finalMessagePath = process.env.FINAL_MESSAGE_PATH;
+            let finalMessage = "";
+            if (finalMessagePath && fs.existsSync(finalMessagePath)) {
+              finalMessage = fs.readFileSync(finalMessagePath, "utf8");
+            }
+            core.setOutput("final_message", finalMessage);
 
       - id: scan_changes
         name: Scan working tree changes
@@ -449,19 +455,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          delimiter="CODEX_FILES_$(date +%s%N)"
           if [[ -n "$(git status --short)" ]]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             {
-              echo "changed_files<<EOF"
+              echo "changed_files<<$delimiter"
               git status --short
-              echo "EOF"
+              echo "$delimiter"
             } >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
             {
-              echo "changed_files<<EOF"
+              echo "changed_files<<$delimiter"
               echo "No tracked changes."
-              echo "EOF"
+              echo "$delimiter"
             } >> "$GITHUB_OUTPUT"
           fi
 
@@ -550,8 +557,8 @@ jobs:
               core.setOutput("pr_error", message);
             }
 
-      - id: finalize
-        name: Collect actor outputs
+      - id: status
+        name: Compute actor status
         if: always()
         shell: bash
         env:
@@ -561,11 +568,6 @@ jobs:
           CHANGED: ${{ steps.scan_changes.outputs.changed }}
           COMMIT_OUTCOME: ${{ steps.commit_push.outcome }}
           ISSUE_PR_OUTCOME: ${{ steps.ensure_issue_pr.outcome }}
-          FINAL_MESSAGE: ${{ steps.capture_codex.outputs.final_message }}
-          CHANGED_FILES: ${{ steps.scan_changes.outputs.changed_files }}
-          COMMIT_SHA: ${{ steps.commit_push.outputs.commit_sha }}
-          PR_URL: ${{ steps.ensure_issue_pr.outputs.pr_url }}
-          PR_NUMBER: ${{ steps.ensure_issue_pr.outputs.pr_number }}
           PR_ERROR: ${{ steps.ensure_issue_pr.outputs.pr_error }}
         run: |
           set -euo pipefail
@@ -583,28 +585,13 @@ jobs:
             status="pr_failed"
           fi
 
-          final_delimiter="CODEX_FINAL_$(date +%s%N)"
-          files_delimiter="CODEX_FILES_$(date +%s%N)"
-          {
-            echo "run_status=$status"
-            echo "changed=$CHANGED"
-            echo "commit_sha=$COMMIT_SHA"
-            echo "pr_url=$PR_URL"
-            echo "pr_number=$PR_NUMBER"
-            echo "pr_error=$PR_ERROR"
-            echo "final_message<<$final_delimiter"
-            printf '%s\n' "$FINAL_MESSAGE"
-            echo "$final_delimiter"
-            echo "changed_files<<$files_delimiter"
-            printf '%s\n' "$CHANGED_FILES"
-            echo "$files_delimiter"
-          } >> "$GITHUB_OUTPUT"
+          echo "run_status=$status" >> "$GITHUB_OUTPUT"
 
       - name: Fail workflow on actor error
-        if: always() && contains('codex_failed,push_failed,pr_failed', steps.finalize.outputs.run_status)
+        if: always() && contains('codex_failed,push_failed', steps.status.outputs.run_status)
         shell: bash
         run: |
-          echo "Actor run ended with status: ${{ steps.finalize.outputs.run_status }}"
+          echo "Actor run ended with status: ${{ steps.status.outputs.run_status }}"
           exit 1
 
   reply:
