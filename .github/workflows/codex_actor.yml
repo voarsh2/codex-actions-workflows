@@ -253,7 +253,43 @@ jobs:
       pr_url: ${{ steps.ensure_issue_pr.outputs.pr_url }}
       pr_number: ${{ steps.ensure_issue_pr.outputs.pr_number }}
       pr_error: ${{ steps.ensure_issue_pr.outputs.pr_error }}
+      tracking_comment_id: ${{ steps.create_progress_comment.outputs.comment_id }}
     steps:
+      - id: create_progress_comment
+        name: Create progress comment
+        uses: actions/github-script@v8
+        env:
+          OWNER: ${{ inputs.repository_owner }}
+          REPO: ${{ inputs.repository_name }}
+          ACTOR: ${{ inputs.actor }}
+          MODE: ${{ needs.prepare.outputs.mode }}
+          REPLY_NUMBER: ${{ needs.prepare.outputs.reply_number }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const owner = process.env.OWNER;
+            const repo = process.env.REPO;
+            const actor = process.env.ACTOR;
+            const mode = process.env.MODE;
+            const issueNumber = Number(process.env.REPLY_NUMBER);
+            const marker = `<!-- codex-actor:progress mode=${mode} status=starting -->`;
+            const body = [
+              marker,
+              `@${actor} Acknowledged. Starting Codex run.`,
+              "",
+              `Mode: \`${mode}\``,
+              "Status: preparing repository context",
+            ].join("\n");
+
+            const { data: comment } = await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: issueNumber,
+              body,
+            });
+
+            core.setOutput("comment_id", String(comment.id));
+
       - name: Checkout target ref
         uses: actions/checkout@v5
         with:
@@ -510,6 +546,38 @@ jobs:
             core.setOutput("final_message_path", finalMessagePath);
             core.setOutput("output_schema_path", outputSchemaPath);
 
+      - name: Update progress comment for Codex execution
+        uses: actions/github-script@v8
+        env:
+          OWNER: ${{ inputs.repository_owner }}
+          REPO: ${{ inputs.repository_name }}
+          ACTOR: ${{ inputs.actor }}
+          MODE: ${{ needs.prepare.outputs.mode }}
+          COMMENT_ID: ${{ steps.create_progress_comment.outputs.comment_id }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const owner = process.env.OWNER;
+            const repo = process.env.REPO;
+            const actor = process.env.ACTOR;
+            const mode = process.env.MODE;
+            const commentId = Number(process.env.COMMENT_ID);
+            const marker = `<!-- codex-actor:progress mode=${mode} status=running -->`;
+            const body = [
+              marker,
+              `@${actor} Codex is running.`,
+              "",
+              `Mode: \`${mode}\``,
+              "Status: building context and executing repository work",
+            ].join("\n");
+
+            await github.rest.issues.updateComment({
+              owner,
+              repo,
+              comment_id: commentId,
+              body,
+            });
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -641,6 +709,58 @@ jobs:
               echo "$delimiter"
             } >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Update progress comment for persistence
+        if: always()
+        uses: actions/github-script@v8
+        env:
+          OWNER: ${{ inputs.repository_owner }}
+          REPO: ${{ inputs.repository_name }}
+          ACTOR: ${{ inputs.actor }}
+          MODE: ${{ needs.prepare.outputs.mode }}
+          COMMENT_ID: ${{ steps.create_progress_comment.outputs.comment_id }}
+          CODEX_OUTCOME: ${{ steps.run_codex.outcome }}
+          CHANGED: ${{ steps.scan_changes.outputs.changed }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const owner = process.env.OWNER;
+            const repo = process.env.REPO;
+            const actor = process.env.ACTOR;
+            const mode = process.env.MODE;
+            const commentId = Number(process.env.COMMENT_ID);
+            const codexOutcome = process.env.CODEX_OUTCOME;
+            const changed = process.env.CHANGED === "true";
+            const dryRun = process.env.DRY_RUN === "true";
+            let status = "finalizing";
+            let statusText = "assembling the final response";
+
+            if (codexOutcome !== "success") {
+              status = "failed";
+              statusText = "Codex did not complete successfully";
+            } else if (changed && !dryRun) {
+              status = "persisting";
+              statusText = mode === "issue"
+                ? "committing changes and syncing branch or PR state"
+                : "committing and pushing repository changes";
+            }
+
+            const marker = `<!-- codex-actor:progress mode=${mode} status=${status} -->`;
+            const body = [
+              marker,
+              `@${actor} Codex run in progress.`,
+              "",
+              `Mode: \`${mode}\``,
+              `Status: ${statusText}`,
+            ].join("\n");
+
+            await github.rest.issues.updateComment({
+              owner,
+              repo,
+              comment_id: commentId,
+              body,
+            });
 
       - id: commit_push
         name: Commit and push changes
@@ -794,6 +914,7 @@ jobs:
           PR_URL: ${{ needs.act.outputs.pr_url }}
           PR_NUMBER: ${{ needs.act.outputs.pr_number }}
           PR_ERROR: ${{ needs.act.outputs.pr_error }}
+          TRACKING_COMMENT_ID: ${{ needs.act.outputs.tracking_comment_id }}
           DRY_RUN: ${{ inputs.dry_run }}
         with:
           github-token: ${{ github.token }}
@@ -813,6 +934,7 @@ jobs:
             const prUrl = process.env.PR_URL || "";
             const prNumber = process.env.PR_NUMBER || "";
             const prError = process.env.PR_ERROR || "";
+            const trackingCommentId = Number(process.env.TRACKING_COMMENT_ID || "0");
             const dryRun = process.env.DRY_RUN === "true";
             const marker = `<!-- codex-actor:reply mode=${mode} status=${runStatus || "unknown"} -->`;
 
@@ -868,9 +990,18 @@ jobs:
               body = `${marker}\n${parts.join("\n")}`;
             }
 
-            await github.rest.issues.createComment({
-              owner,
-              repo,
-              issue_number: replyNumber,
-              body,
-            });
+            if (trackingCommentId > 0) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: trackingCommentId,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: replyNumber,
+                body,
+              });
+            }
