@@ -382,26 +382,24 @@ jobs:
           export CODEX_HOME="$RUNNER_TEMP/codex-home"
           mkdir -p "$CODEX_HOME"
           echo "::add-mask::$CODEX_API_KEY"
-          cat > "$CODEX_HOME/config.toml" <<EOF
-model_provider = "${MODEL_PROVIDER}"
-model = "${MODEL}"
-model_reasoning_effort = "${EFFORT}"
-sandbox_mode = "workspace-write"
-
-[features]
-multi_agent = false
-guardian_approval = false
-remote_connections = false
-apps = false
-apps_mcp_gateway = false
-
-[model_providers.${MODEL_PROVIDER}]
-name = "OpenAI"
-base_url = "${CODEX_BASE_URL}"
-wire_api = "responses"
-requires_openai_auth = false
-experimental_bearer_token = "${CODEX_API_KEY}"
-EOF
+          {
+            printf 'model_provider = "%s"\n' "$MODEL_PROVIDER"
+            printf 'model = "%s"\n' "$MODEL"
+            printf 'model_reasoning_effort = "%s"\n' "$EFFORT"
+            printf 'sandbox_mode = "workspace-write"\n\n'
+            printf '[features]\n'
+            printf 'multi_agent = false\n'
+            printf 'guardian_approval = false\n'
+            printf 'remote_connections = false\n'
+            printf 'apps = false\n'
+            printf 'apps_mcp_gateway = false\n\n'
+            printf '[model_providers.%s]\n' "$MODEL_PROVIDER"
+            printf 'name = "OpenAI"\n'
+            printf 'base_url = "%s"\n' "$CODEX_BASE_URL"
+            printf 'wire_api = "responses"\n'
+            printf 'requires_openai_auth = false\n'
+            printf 'experimental_bearer_token = "%s"\n' "$CODEX_API_KEY"
+          } > "$CODEX_HOME/config.toml"
           {
             echo "codex_home=$CODEX_HOME"
             echo "config_path=$CODEX_HOME/config.toml"
