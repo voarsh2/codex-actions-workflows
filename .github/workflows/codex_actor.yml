@@ -491,7 +491,7 @@ jobs:
 
       - id: ensure_issue_pr
         name: Create or update issue PR
-        if: always() && needs.prepare.outputs.mode == 'issue'
+        if: always() && needs.prepare.outputs.mode == 'issue' && steps.run_codex.outcome == 'success' && steps.scan_changes.outputs.changed == 'true' && inputs.dry_run == false
         uses: actions/github-script@v8
         env:
           OWNER: ${{ inputs.repository_owner }}
@@ -502,7 +502,6 @@ jobs:
           ISSUE_TITLE: ${{ needs.prepare.outputs.issue_title }}
           BRANCH_EXISTS: ${{ steps.issue_branch.outputs.branch_exists }}
           COMMIT_PUSH_OUTCOME: ${{ steps.commit_push.outcome }}
-          DRY_RUN: ${{ inputs.dry_run }}
         with:
           github-token: ${{ github.token }}
           script: |
@@ -514,13 +513,12 @@ jobs:
             const issueTitle = process.env.ISSUE_TITLE || `Issue ${issueNumber}`;
             const branchExists = (process.env.BRANCH_EXISTS || "false") === "true";
             const commitPushed = process.env.COMMIT_PUSH_OUTCOME === "success";
-            const dryRun = (process.env.DRY_RUN || "false") === "true";
 
             core.setOutput("pr_url", "");
             core.setOutput("pr_number", "");
             core.setOutput("pr_error", "");
 
-            if (dryRun || (!branchExists && !commitPushed)) {
+            if (!branchExists && !commitPushed) {
               return;
             }
 
@@ -567,7 +565,6 @@ jobs:
           CODEX_OUTCOME: ${{ steps.run_codex.outcome }}
           CHANGED: ${{ steps.scan_changes.outputs.changed }}
           COMMIT_OUTCOME: ${{ steps.commit_push.outcome }}
-          ISSUE_PR_OUTCOME: ${{ steps.ensure_issue_pr.outcome }}
           PR_ERROR: ${{ steps.ensure_issue_pr.outputs.pr_error }}
         run: |
           set -euo pipefail
@@ -581,7 +578,7 @@ jobs:
             status="dry_run"
           elif [[ -n "$COMMIT_OUTCOME" && "$COMMIT_OUTCOME" != "success" ]]; then
             status="push_failed"
-          elif [[ "$MODE" == "issue" && -n "$PR_ERROR" ]]; then
+          elif [[ "$MODE" == "issue" && "$CHANGED" == "true" && -n "$PR_ERROR" ]]; then
             status="pr_failed"
           fi
 
