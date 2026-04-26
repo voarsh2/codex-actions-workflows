@@ -27,6 +27,7 @@ jobs:
       sender_type: ${{ github.event.sender.type }}
       author_association: ${{ github.event.comment.author_association }}
       comment_body: ${{ github.event.comment.body }}
+      comment_id: ${{ github.event.comment.id }}
       issue_number: ${{ github.event.issue.number }}
       is_pull_request: ${{ github.event.issue.pull_request != null }}
       pull_request_number: ${{ github.event.issue.number }}

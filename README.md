@@ -48,6 +48,7 @@ Required:
 - `sender_type`
 - `author_association`
 - `comment_body`
+- `comment_id`
 - `issue_number`
 
 Context flags:
@@ -62,6 +63,8 @@ Optional:
 - `model`
 - `effort`
 - `codex_version`
+- `history_comment_limit`
+- `history_max_comment_chars`
 - `dry_run`
 - `allow_users`
 - `deny_untrusted`
@@ -73,6 +76,8 @@ Defaults:
 - `model`: `gpt-5.5`
 - `effort`: `medium`
 - `codex_version`: `latest`
+- `history_comment_limit`: `20`
+- `history_max_comment_chars`: `2000`
 - `dry_run`: `false`
 - `deny_untrusted`: `true`
 
@@ -105,3 +110,5 @@ The example workflow handles both normal issue comments and PR comments through 
 - Fork PRs get a safe refusal comment instead of an unreliable push attempt.
 - Issue-triggered runs reuse `codex/issue-<number>` by default so repeated commands do not create duplicate PRs.
 - The workflow writes a minimal temporary `config.toml` for `codex exec` at runtime instead of relying on `openai/codex-action`.
+- Prompt context includes bounded prior conversation history.
+- Human comments are included by default; bot comments are only re-ingested if they contain this workflow's hidden marker.

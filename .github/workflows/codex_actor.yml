@@ -30,6 +30,9 @@ on:
       comment_body:
         required: true
         type: string
+      comment_id:
+        required: true
+        type: number
       issue_number:
         required: true
         type: number
@@ -61,6 +64,14 @@ on:
         required: false
         type: string
         default: latest
+      history_comment_limit:
+        required: false
+        type: number
+        default: 20
+      history_max_comment_chars:
+        required: false
+        type: number
+        default: 2000
       dry_run:
         required: false
         type: boolean
@@ -111,6 +122,7 @@ jobs:
           INPUT_SENDER_TYPE: ${{ inputs.sender_type }}
           INPUT_AUTHOR_ASSOCIATION: ${{ inputs.author_association }}
           INPUT_COMMENT_BODY: ${{ inputs.comment_body }}
+          INPUT_COMMENT_ID: ${{ inputs.comment_id }}
           INPUT_ISSUE_NUMBER: ${{ inputs.issue_number }}
           INPUT_IS_PULL_REQUEST: ${{ inputs.is_pull_request }}
           INPUT_PULL_REQUEST_NUMBER: ${{ inputs.pull_request_number }}
@@ -296,8 +308,11 @@ jobs:
           REPO: ${{ inputs.repository_name }}
           TARGET_NUMBER: ${{ needs.prepare.outputs.target_number }}
           COMMAND_TEXT: ${{ needs.prepare.outputs.command_text }}
+          COMMENT_ID: ${{ inputs.comment_id }}
           DEFAULT_BRANCH: ${{ needs.prepare.outputs.default_branch }}
           PUSH_REF: ${{ needs.prepare.outputs.push_ref }}
+          HISTORY_COMMENT_LIMIT: ${{ inputs.history_comment_limit }}
+          HISTORY_MAX_COMMENT_CHARS: ${{ inputs.history_max_comment_chars }}
           RUNNER_TEMP: ${{ runner.temp }}
         with:
           github-token: ${{ github.token }}
@@ -309,10 +324,55 @@ jobs:
             const repo = process.env.REPO;
             const targetNumber = Number(process.env.TARGET_NUMBER);
             const commandText = process.env.COMMAND_TEXT;
+            const currentCommentId = Number(process.env.COMMENT_ID || "0");
             const pushRef = process.env.PUSH_REF;
+            const historyLimit = Number(process.env.HISTORY_COMMENT_LIMIT || "20");
+            const historyMaxChars = Number(process.env.HISTORY_MAX_COMMENT_CHARS || "2000");
             const outputDir = path.join(process.env.RUNNER_TEMP, "codex-actor");
+            const markerPattern = /<!--\s*codex-actor:reply\b[\s\S]*?-->/i;
             let title = "";
             let body = "";
+
+            function trimForPrompt(text) {
+              const normalized = (text || "").replace(/\r\n/g, "\n").trim();
+              if (!normalized) {
+                return "(empty)";
+              }
+              if (normalized.length <= historyMaxChars) {
+                return normalized;
+              }
+              return `${normalized.slice(0, historyMaxChars)}\n...[truncated]`;
+            }
+
+            function extractBotSummary(commentBody) {
+              const withoutMarkers = (commentBody || "").replace(/<!--[\s\S]*?-->/g, "").trim();
+              const summaryMatch = withoutMarkers.match(/Codex summary:\n([\s\S]*?)(?:\n\nTracked changes detected before persistence:|\n\nRequested command:|$)/i);
+              if (summaryMatch) {
+                return trimForPrompt(summaryMatch[1]);
+              }
+              return trimForPrompt(withoutMarkers);
+            }
+
+            async function loadIssueComments() {
+              return github.paginate(github.rest.issues.listComments, {
+                owner,
+                repo,
+                issue_number: targetNumber,
+                per_page: 100,
+              });
+            }
+
+            async function loadReviewComments() {
+              if (mode !== "pr") {
+                return [];
+              }
+              return github.paginate(github.rest.pulls.listReviewComments, {
+                owner,
+                repo,
+                pull_number: targetNumber,
+                per_page: 100,
+              });
+            }
 
             if (mode === "pr") {
               const { data: pull } = await github.rest.pulls.get({
@@ -332,6 +392,66 @@ jobs:
               body = issue.body || "";
             }
 
+            const [issueComments, reviewComments] = await Promise.all([
+              loadIssueComments(),
+              loadReviewComments(),
+            ]);
+
+            const normalizedComments = [
+              ...issueComments.map((comment) => ({
+                source: "issue",
+                id: Number(comment.id),
+                created_at: comment.created_at || "",
+                author: comment.user?.login || "unknown",
+                association: comment.author_association || "",
+                isBot: (comment.user?.type || "").toLowerCase() === "bot" || (comment.user?.login || "").endsWith("[bot]"),
+                body: comment.body || "",
+              })),
+              ...reviewComments.map((comment) => ({
+                source: "review",
+                id: Number(comment.id),
+                created_at: comment.created_at || "",
+                author: comment.user?.login || "unknown",
+                association: comment.author_association || "",
+                isBot: (comment.user?.type || "").toLowerCase() === "bot" || (comment.user?.login || "").endsWith("[bot]"),
+                body: comment.body || "",
+              })),
+            ]
+              .filter((comment) => comment.id !== currentCommentId)
+              .filter((comment) => {
+                if (!comment.isBot) {
+                  return true;
+                }
+                return markerPattern.test(comment.body || "");
+              })
+              .sort((left, right) => {
+                const dateCompare = String(left.created_at).localeCompare(String(right.created_at));
+                if (dateCompare !== 0) {
+                  return dateCompare;
+                }
+                return left.id - right.id;
+              });
+
+            const recentComments = normalizedComments.slice(-historyLimit);
+            const historySections = recentComments.length === 0
+              ? ["No prior conversation comments."]
+              : recentComments.map((comment) => {
+                  const headingParts = [
+                    `### ${comment.created_at || "unknown time"}`,
+                    `${comment.author}${comment.association ? ` [${comment.association}]` : ""}`,
+                    `${comment.source} comment`,
+                  ];
+                  const commentText = comment.isBot
+                    ? `Codex actor summary:\n${extractBotSummary(comment.body)}`
+                    : trimForPrompt(comment.body);
+                  return `${headingParts.join(" - ")}\n${commentText}`;
+                });
+
+            const historyBlock = [
+              "Conversation history:",
+              ...historySections,
+            ].join("\n\n");
+
             const prompt = [
               "You are running inside GitHub Actions as a repository actor.",
               "",
@@ -348,9 +468,12 @@ jobs:
               `${mode === "pr" ? "Pull request" : "Issue"} body:`,
               body || "(empty)",
               "",
+              historyBlock,
+              "",
               "Requirements:",
               "- Make only the code or documentation changes needed to satisfy the instruction.",
               "- Do not run git commit or git push. The workflow handles persistence.",
+              "- Use the conversation history to honor prior decisions and context, but prioritize the current command if it conflicts.",
               "- If no file changes are needed, explain that clearly in the final message.",
               "- End with a concise summary of what changed and any tests or checks you ran.",
             ].join("\n");
@@ -639,15 +762,16 @@ jobs:
             const prNumber = process.env.PR_NUMBER || "";
             const prError = process.env.PR_ERROR || "";
             const dryRun = process.env.DRY_RUN === "true";
+            const marker = `<!-- codex-actor:reply mode=${mode} status=${runStatus || "unknown"} -->`;
 
             let body = "";
 
             if (skipReason === "untrusted") {
-              body = `@${actor} this workflow only accepts \`@codex\` or \`/codex\` commands from trusted collaborators.`;
+              body = `${marker}\n@${actor} this workflow only accepts \`@codex\` or \`/codex\` commands from trusted collaborators.`;
             } else if (skipReason === "empty_command") {
-              body = `@${actor} include an instruction after \`@codex\` or \`/codex\` so I know what to do.`;
+              body = `${marker}\n@${actor} include an instruction after \`@codex\` or \`/codex\` so I know what to do.`;
             } else if (skipReason === "fork_pr_unsupported") {
-              body = `@${actor} this PR comes from a fork, so v1 will not try to push to the contributor branch from this workflow.`;
+              body = `${marker}\n@${actor} this PR comes from a fork, so v1 will not try to push to the contributor branch from this workflow.`;
             } else {
               const statusLine = {
                 success: "Completed the requested run.",
@@ -689,7 +813,7 @@ jobs:
               parts.push(changedFiles);
               parts.push("```");
 
-              body = parts.join("\n");
+              body = `${marker}\n${parts.join("\n")}`;
             }
 
             await github.rest.issues.createComment({
