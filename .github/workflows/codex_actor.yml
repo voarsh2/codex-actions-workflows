@@ -45,14 +45,22 @@ on:
         required: false
         type: string
         default: codex/issue
+      model_provider:
+        required: false
+        type: string
+        default: theclawbay
       model:
         required: false
         type: string
-        default: ""
+        default: gpt-5.5
       effort:
         required: false
         type: string
-        default: ""
+        default: medium
+      codex_version:
+        required: false
+        type: string
+        default: latest
       dry_run:
         required: false
         type: boolean
@@ -68,8 +76,10 @@ on:
     secrets:
       codex_api_key:
         required: true
+      codex_base_url:
+        required: false
       codex_responses_api_endpoint:
-        required: true
+        required: false
 
 jobs:
   prepare:
@@ -229,8 +239,8 @@ jobs:
       changed: ${{ steps.finalize.outputs.changed }}
       changed_files: ${{ steps.finalize.outputs.changed_files }}
       commit_sha: ${{ steps.finalize.outputs.commit_sha }}
-      pr_url: ${{ steps.finalize.outputs.pr_url }}
-      pr_number: ${{ steps.finalize.outputs.pr_number }}
+      pr_url: ${{ steps.ensure_issue_pr.outputs.pr_url }}
+      pr_number: ${{ steps.ensure_issue_pr.outputs.pr_number }}
     steps:
       - name: Checkout target ref
         uses: actions/checkout@v5
@@ -256,6 +266,33 @@ jobs:
             git fetch --no-tags origin "$DEFAULT_BRANCH"
             git checkout -B "$BOT_BRANCH" "refs/remotes/origin/$DEFAULT_BRANCH"
           fi
+
+      - id: resolve_provider
+        name: Resolve provider configuration
+        shell: bash
+        env:
+          SECRET_CODEX_BASE_URL: ${{ secrets.codex_base_url }}
+          SECRET_CODEX_RESPONSES_API_ENDPOINT: ${{ secrets.codex_responses_api_endpoint }}
+          INPUT_MODEL_PROVIDER: ${{ inputs.model_provider }}
+        run: |
+          set -euo pipefail
+          base_url="${SECRET_CODEX_BASE_URL:-}"
+          endpoint="${SECRET_CODEX_RESPONSES_API_ENDPOINT:-}"
+
+          if [[ -z "$base_url" && -n "$endpoint" ]]; then
+            base_url="${endpoint%/responses}"
+          fi
+
+          if [[ -z "$base_url" ]]; then
+            echo "Neither codex_base_url nor codex_responses_api_endpoint was provided." >&2
+            exit 1
+          fi
+
+          echo "::add-mask::$base_url"
+          {
+            echo "base_url=$base_url"
+            echo "provider_name=${INPUT_MODEL_PROVIDER}"
+          } >> "$GITHUB_OUTPUT"
 
       - id: prompt
         name: Build Codex prompt
@@ -324,18 +361,95 @@ jobs:
 
             fs.writeFileSync("codex-actor-prompt.md", prompt);
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - id: install_codex
+        name: Install Codex CLI
+        shell: bash
+        env:
+          CODEX_VERSION: ${{ inputs.codex_version }}
+        run: |
+          set -euo pipefail
+          npm install -g "@openai/codex@${CODEX_VERSION}"
+          codex --version
+
+      - id: write_config
+        name: Write Codex config
+        shell: bash
+        env:
+          CODEX_API_KEY: ${{ secrets.codex_api_key }}
+          CODEX_BASE_URL: ${{ steps.resolve_provider.outputs.base_url }}
+          MODEL_PROVIDER: ${{ steps.resolve_provider.outputs.provider_name }}
+          MODEL: ${{ inputs.model }}
+          EFFORT: ${{ inputs.effort }}
+        run: |
+          set -euo pipefail
+          export CODEX_HOME="$RUNNER_TEMP/codex-home"
+          mkdir -p "$CODEX_HOME"
+          echo "::add-mask::$CODEX_API_KEY"
+          cat > "$CODEX_HOME/config.toml" <<EOF
+model_provider = "${MODEL_PROVIDER}"
+model = "${MODEL}"
+model_reasoning_effort = "${EFFORT}"
+sandbox_mode = "workspace-write"
+
+[features]
+multi_agent = false
+guardian_approval = false
+remote_connections = false
+apps = false
+apps_mcp_gateway = false
+
+[model_providers.${MODEL_PROVIDER}]
+name = "OpenAI"
+base_url = "${CODEX_BASE_URL}"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "${CODEX_API_KEY}"
+EOF
+          {
+            echo "codex_home=$CODEX_HOME"
+            echo "config_path=$CODEX_HOME/config.toml"
+          } >> "$GITHUB_OUTPUT"
+
       - id: run_codex
         name: Run Codex
         continue-on-error: true
-        uses: openai/codex-action@v1
-        with:
-          openai-api-key: ${{ secrets.codex_api_key }}
-          responses-api-endpoint: ${{ secrets.codex_responses_api_endpoint }}
-          prompt-file: codex-actor-prompt.md
-          sandbox: workspace-write
-          model: ${{ inputs.model }}
-          effort: ${{ inputs.effort }}
-          allow-users: ${{ inputs.allow_users }}
+        shell: bash
+        env:
+          CODEX_HOME: ${{ steps.write_config.outputs.codex_home }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          codex exec \
+            --skip-git-repo-check \
+            --sandbox workspace-write \
+            --model "$MODEL" \
+            --output-last-message codex-final-message.txt \
+            - < codex-actor-prompt.md
+
+      - id: capture_codex
+        name: Capture Codex output
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f codex-final-message.txt ]]; then
+            {
+              echo "final_message<<EOF"
+              cat codex-final-message.txt
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "final_message<<EOF"
+              echo ""
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
 
       - id: scan_changes
         name: Scan working tree changes
@@ -448,7 +562,7 @@ jobs:
           CHANGED: ${{ steps.scan_changes.outputs.changed }}
           COMMIT_OUTCOME: ${{ steps.commit_push.outcome }}
           ISSUE_PR_OUTCOME: ${{ steps.ensure_issue_pr.outcome }}
-          FINAL_MESSAGE: ${{ steps.run_codex.outputs.final-message }}
+          FINAL_MESSAGE: ${{ steps.capture_codex.outputs.final_message }}
           CHANGED_FILES: ${{ steps.scan_changes.outputs.changed_files }}
           COMMIT_SHA: ${{ steps.commit_push.outputs.commit_sha }}
           PR_URL: ${{ steps.ensure_issue_pr.outputs.pr_url }}
