@@ -547,6 +547,7 @@ jobs:
             printf 'remote_connections = false\n'
             printf 'apps = false\n'
             printf 'apps_mcp_gateway = false\n\n'
+            printf 'use_legacy_landlock = true\n\n'
             printf '[model_providers.%s]\n' "$MODEL_PROVIDER"
             printf 'name = "OpenAI"\n'
             printf 'base_url = "%s"\n' "$CODEX_BASE_URL"
