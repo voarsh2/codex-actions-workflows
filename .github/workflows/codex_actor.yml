@@ -246,6 +246,7 @@ jobs:
     outputs:
       run_status: ${{ steps.status.outputs.run_status }}
       final_message: ${{ steps.capture_codex.outputs.final_message }}
+      commit_message: ${{ steps.capture_codex.outputs.commit_message }}
       changed: ${{ steps.scan_changes.outputs.changed }}
       changed_files: ${{ steps.scan_changes.outputs.changed_files }}
       commit_sha: ${{ steps.commit_push.outputs.commit_sha }}
@@ -342,6 +343,10 @@ jobs:
                 return normalized;
               }
               return `${normalized.slice(0, historyMaxChars)}\n...[truncated]`;
+            }
+
+            function normalizeHumanComment(text) {
+              return trimForPrompt((text || "").replace(/^\s*(?:@codex|\/codex)\b\s*/i, ""));
             }
 
             function extractBotSummary(commentBody) {
@@ -443,7 +448,7 @@ jobs:
                   ];
                   const commentText = comment.isBot
                     ? `Codex actor summary:\n${extractBotSummary(comment.body)}`
-                    : trimForPrompt(comment.body);
+                    : normalizeHumanComment(comment.body);
                   return `${headingParts.join(" - ")}\n${commentText}`;
                 });
 
@@ -474,16 +479,33 @@ jobs:
               "- Make only the code or documentation changes needed to satisfy the instruction.",
               "- Do not run git commit or git push. The workflow handles persistence.",
               "- Use the conversation history to honor prior decisions and context, but prioritize the current command if it conflicts.",
-              "- If no file changes are needed, explain that clearly in the final message.",
-              "- End with a concise summary of what changed and any tests or checks you ran.",
+              "- Your final response must match the provided JSON schema exactly.",
+              "- Set reply_markdown to a concise human-readable summary of the result.",
+              "- Set change_summary to a short description of what changed, or 'No changes made.' if nothing changed.",
+              "- Set tests_run to a short description of tests/checks run, or 'Not run.' if none were run.",
+              "- Set commit_message to a concise imperative commit subject if tracked files changed, otherwise set it to an empty string.",
             ].join("\n");
 
             fs.mkdirSync(outputDir, { recursive: true });
             const promptPath = path.join(outputDir, "codex-actor-prompt.md");
             const finalMessagePath = path.join(outputDir, "codex-final-message.txt");
+            const outputSchemaPath = path.join(outputDir, "codex-output-schema.json");
+            const outputSchema = {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                reply_markdown: { type: "string" },
+                change_summary: { type: "string" },
+                tests_run: { type: "string" },
+                commit_message: { type: "string" },
+              },
+              required: ["reply_markdown", "change_summary", "tests_run", "commit_message"],
+            };
             fs.writeFileSync(promptPath, prompt);
+            fs.writeFileSync(outputSchemaPath, JSON.stringify(outputSchema, null, 2));
             core.setOutput("prompt_path", promptPath);
             core.setOutput("final_message_path", finalMessagePath);
+            core.setOutput("output_schema_path", outputSchemaPath);
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -546,12 +568,14 @@ jobs:
           MODEL: ${{ inputs.model }}
           PROMPT_PATH: ${{ steps.prompt.outputs.prompt_path }}
           FINAL_MESSAGE_PATH: ${{ steps.prompt.outputs.final_message_path }}
+          OUTPUT_SCHEMA_PATH: ${{ steps.prompt.outputs.output_schema_path }}
         run: |
           set -euo pipefail
           codex exec \
             --skip-git-repo-check \
             --sandbox workspace-write \
             --model "$MODEL" \
+            --output-schema "$OUTPUT_SCHEMA_PATH" \
             --output-last-message "$FINAL_MESSAGE_PATH" \
             - < "$PROMPT_PATH"
 
@@ -567,10 +591,29 @@ jobs:
             const fs = require("fs");
             const finalMessagePath = process.env.FINAL_MESSAGE_PATH;
             let finalMessage = "";
+            let commitMessage = "";
             if (finalMessagePath && fs.existsSync(finalMessagePath)) {
-              finalMessage = fs.readFileSync(finalMessagePath, "utf8");
+              const raw = fs.readFileSync(finalMessagePath, "utf8");
+              try {
+                const parsed = JSON.parse(raw);
+                const replyMarkdown = typeof parsed.reply_markdown === "string" ? parsed.reply_markdown.trim() : "";
+                const changeSummary = typeof parsed.change_summary === "string" ? parsed.change_summary.trim() : "";
+                const testsRun = typeof parsed.tests_run === "string" ? parsed.tests_run.trim() : "";
+                const rawCommitMessage = typeof parsed.commit_message === "string" ? parsed.commit_message : "";
+                commitMessage = rawCommitMessage.replace(/\r\n/g, "\n").split("\n")[0].trim();
+
+                finalMessage = [
+                  replyMarkdown || "No summary returned.",
+                  "",
+                  `Summary: ${changeSummary || "No summary returned."}`,
+                  `Tests/checks: ${testsRun || "Not run."}`,
+                ].join("\n");
+              } catch {
+                finalMessage = raw;
+              }
             }
             core.setOutput("final_message", finalMessage);
+            core.setOutput("commit_message", commitMessage);
 
       - id: scan_changes
         name: Scan working tree changes
@@ -603,12 +646,17 @@ jobs:
           PUSH_REF: ${{ needs.prepare.outputs.push_ref }}
           MODE: ${{ needs.prepare.outputs.mode }}
           TARGET_NUMBER: ${{ needs.prepare.outputs.target_number }}
+          COMMIT_MESSAGE: ${{ steps.capture_codex.outputs.commit_message }}
         run: |
           set -euo pipefail
+          commit_message="${COMMIT_MESSAGE//$'\r'/}"
+          if [[ -z "$commit_message" ]]; then
+            commit_message="codex: apply request from ${MODE} #${TARGET_NUMBER}"
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "codex: apply request from ${MODE} #${TARGET_NUMBER}"
+          git commit -m "$commit_message"
           git push origin "HEAD:${PUSH_REF}"
           echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 

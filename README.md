@@ -112,3 +112,5 @@ The example workflow handles both normal issue comments and PR comments through 
 - The workflow writes a minimal temporary `config.toml` for `codex exec` at runtime instead of relying on `openai/codex-action`.
 - Prompt context includes bounded prior conversation history.
 - Human comments are included by default; bot comments are only re-ingested if they contain this workflow's hidden marker.
+- Historical human comments have leading `@codex` or `/codex` summon syntax stripped before they are added to prompt context.
+- Codex returns structured output so the workflow can use a model-authored commit subject while still owning `git commit` and `git push`.
