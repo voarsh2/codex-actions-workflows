@@ -113,8 +113,6 @@ jobs:
         with:
           github-token: ${{ github.token }}
           script: |
-            const core = require("@actions/core");
-
             const owner = process.env.INPUT_REPOSITORY_OWNER;
             const repo = process.env.INPUT_REPOSITORY_NAME;
             const actor = process.env.INPUT_ACTOR;
@@ -395,7 +393,6 @@ jobs:
         with:
           github-token: ${{ github.token }}
           script: |
-            const core = require("@actions/core");
             const owner = process.env.OWNER;
             const repo = process.env.REPO;
             const issueNumber = Number(process.env.ISSUE_NUMBER);
