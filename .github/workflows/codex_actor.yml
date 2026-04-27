@@ -736,14 +736,18 @@ jobs:
             let status = "finalizing";
             let statusText = "assembling the final response";
 
-            if (codexOutcome !== "success") {
+            if (changed && !dryRun) {
+              status = "persisting";
+              statusText = codexOutcome === "success"
+                ? (mode === "issue"
+                    ? "committing changes and syncing branch or PR state"
+                    : "committing and pushing repository changes")
+                : (mode === "issue"
+                    ? "Codex was interrupted; preserving tracked changes and syncing branch or PR state"
+                    : "Codex was interrupted; preserving tracked changes");
+            } else if (codexOutcome !== "success") {
               status = "failed";
               statusText = "Codex did not complete successfully";
-            } else if (changed && !dryRun) {
-              status = "persisting";
-              statusText = mode === "issue"
-                ? "committing changes and syncing branch or PR state"
-                : "committing and pushing repository changes";
             }
 
             const marker = `<!-- codex-actor:progress mode=${mode} status=${status} -->`;
@@ -764,7 +768,7 @@ jobs:
 
       - id: commit_push
         name: Commit and push changes
-        if: always() && steps.run_codex.outcome == 'success' && steps.scan_changes.outputs.changed == 'true' && inputs.dry_run == false
+        if: always() && steps.scan_changes.outputs.changed == 'true' && inputs.dry_run == false
         shell: bash
         env:
           PUSH_REF: ${{ needs.prepare.outputs.push_ref }}
@@ -786,7 +790,7 @@ jobs:
 
       - id: ensure_issue_pr
         name: Create or update issue PR
-        if: always() && needs.prepare.outputs.mode == 'issue' && steps.run_codex.outcome == 'success' && steps.scan_changes.outputs.changed == 'true' && inputs.dry_run == false
+        if: always() && needs.prepare.outputs.mode == 'issue' && steps.scan_changes.outputs.changed == 'true' && inputs.dry_run == false && steps.commit_push.outcome == 'success'
         uses: actions/github-script@v8
         env:
           OWNER: ${{ inputs.repository_owner }}
@@ -865,16 +869,18 @@ jobs:
           set -euo pipefail
           status="success"
 
-          if [[ "$CODEX_OUTCOME" != "success" ]]; then
+          if [[ -n "$COMMIT_OUTCOME" && "$COMMIT_OUTCOME" != "success" ]]; then
+            status="push_failed"
+          elif [[ "$MODE" == "issue" && "$CHANGED" == "true" && -n "$PR_ERROR" ]]; then
+            status="pr_failed"
+          elif [[ "$CODEX_OUTCOME" != "success" && "$CHANGED" == "true" && "$DRY_RUN" != "true" && "$COMMIT_OUTCOME" == "success" ]]; then
+            status="partial_persisted"
+          elif [[ "$CODEX_OUTCOME" != "success" ]]; then
             status="codex_failed"
           elif [[ "$CHANGED" != "true" ]]; then
             status="no_changes"
           elif [[ "$DRY_RUN" == "true" ]]; then
             status="dry_run"
-          elif [[ -n "$COMMIT_OUTCOME" && "$COMMIT_OUTCOME" != "success" ]]; then
-            status="push_failed"
-          elif [[ "$MODE" == "issue" && "$CHANGED" == "true" && -n "$PR_ERROR" ]]; then
-            status="pr_failed"
           fi
 
           echo "run_status=$status" >> "$GITHUB_OUTPUT"
@@ -951,6 +957,7 @@ jobs:
                 success: "Completed the requested run.",
                 no_changes: "Ran successfully and did not need to change tracked files.",
                 dry_run: "Dry run complete. Changes were produced but not committed.",
+                partial_persisted: "Codex was interrupted, but tracked changes were preserved and pushed.",
                 codex_failed: "Codex did not complete successfully.",
                 push_failed: "Codex finished, but committing or pushing changes failed.",
                 pr_failed: "Codex finished and changes were pushed, but PR creation or lookup failed.",
