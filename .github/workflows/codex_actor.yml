@@ -579,6 +579,14 @@ jobs:
               '  fs.writeFileSync(`${stateDir}/${name}`, value, "utf8");',
               '}',
               '',
+              'function writeFileIfChanged(name, value) {',
+              '  try {',
+              '    const existing = fs.readFileSync(`${stateDir}/${name}`, "utf8");',
+              '    if (existing === value) return;',
+              '  } catch {}',
+              '  writeFile(name, value);',
+              '}',
+              '',
               'function normalizeText(text) {',
               '  const normalized = String(text || "").replace(/\\r\\n/g, "\\n").trim();',
               '  if (!normalized) return "";',
@@ -611,7 +619,118 @@ jobs:
               '  return "";',
               '}',
               '',
-              'let wrotePlan = false;',
+              'function updatePlan(text) {',
+              '  const normalized = normalizeText(text);',
+              '  if (!normalized) return false;',
+              '  writeFileIfChanged("task-plan.txt", `${normalized}\\n`);',
+              '  return true;',
+              '}',
+              '',
+              'function updateStatus(text) {',
+              '  const normalized = normalizeText(text);',
+              '  if (!normalized) return;',
+              '  writeFileIfChanged("latest-status.txt", `${normalized}\\n`);',
+              '}',
+              '',
+              'function updatePhase(text) {',
+              '  const normalized = normalizeText(text);',
+              '  if (!normalized) return;',
+              '  writeFileIfChanged("phase.txt", `${normalized}\\n`);',
+              '}',
+              '',
+              'function summarizeCommand(item) {',
+              '  const command = normalizeText(item?.command || item?.formatted_command || extractText(item));',
+              '  if (!command) return "";',
+              '  const status = String(item?.status || "").trim();',
+              '  if (status === "completed") return `Completed command: ${command}`;',
+              '  if (status === "failed") return `Command failed: ${command}`;',
+              '  return `Running command: ${command}`;',
+              '}',
+              '',
+              'function summarizeFileChange(item) {',
+              '  const rawChanges = Array.isArray(item?.changes) ? item.changes : [];',
+              '  const paths = rawChanges',
+              '    .map((change) => change?.path || change?.file_path || change?.file || "")',
+              '    .filter(Boolean)',
+              '    .slice(0, 4);',
+              '  if (paths.length === 0) return "";',
+              '  return paths.length === 1',
+              '    ? `Updating file: ${paths[0]}`',
+              '    : `Updating files: ${paths.join(", ")}`;',
+              '}',
+              '',
+              'function summarizeTodoList(item) {',
+              '  const entries = Array.isArray(item?.items) ? item.items : [];',
+              '  const lines = entries',
+              '    .map((entry) => {',
+              '      const text = normalizeText(entry?.text || entry?.title || entry?.content || "");',
+              '      if (!text) return "";',
+              '      const done = Boolean(entry?.done || entry?.completed || entry?.status === "completed");',
+              '      return `- [${done ? "x" : " "}] ${text}`;',
+              '    })',
+              '    .filter(Boolean)',
+              '    .slice(0, 6);',
+              '  return lines.join("\\n");',
+              '}',
+              '',
+              'function summarizeToolCall(item) {',
+              '  const server = normalizeText(item?.server || item?.server_name || "");',
+              '  const tool = normalizeText(item?.tool || item?.tool_name || item?.name || "");',
+              '  const target = [server, tool].filter(Boolean).join("/");',
+              '  return target ? `Calling tool: ${target}` : "";',
+              '}',
+              '',
+              'function handleItemEvent(eventType, item) {',
+              '  const itemType = String(item?.type || "").trim();',
+              '  if (!itemType) return;',
+              '  if (itemType === "todo_list") {',
+              '    const plan = summarizeTodoList(item);',
+              '    if (updatePlan(plan)) {',
+              '      updateStatus("Updated task plan.");',
+              '      updatePhase("Planning work");',
+              '    }',
+              '    return;',
+              '  }',
+              '  if (itemType === "command_execution") {',
+              '    const summary = summarizeCommand(item);',
+              '    if (!summary) return;',
+              '    updateStatus(summary);',
+              '    updatePhase("Running repository commands");',
+              '    return;',
+              '  }',
+              '  if (itemType === "file_change") {',
+              '    const summary = summarizeFileChange(item);',
+              '    if (!summary) return;',
+              '    updateStatus(summary);',
+              '    updatePhase("Editing repository files");',
+              '    return;',
+              '  }',
+              '  if (itemType === "mcp_tool_call") {',
+              '    const summary = summarizeToolCall(item);',
+              '    if (!summary) return;',
+              '    updateStatus(summary);',
+              '    updatePhase("Calling external tools");',
+              '    return;',
+              '  }',
+              '  if (itemType === "reasoning" && eventType === "item.completed") {',
+              '    const summary = extractText(item);',
+              '    if (!summary) return;',
+              '    updateStatus(summary);',
+              '    return;',
+              '  }',
+              '  if (itemType === "agent_message" && eventType === "item.completed") {',
+              '    const summary = extractText(item);',
+              '    if (!summary) return;',
+              '    updateStatus(summary);',
+              '    try {',
+              '      const existingPlan = normalizeText(fs.readFileSync(`${stateDir}/task-plan.txt`, "utf8"));',
+              '      if (!existingPlan) updatePlan(summary);',
+              '    } catch {',
+              '      updatePlan(summary);',
+              '    }',
+              '  }',
+              '}',
+              '',
               'const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });',
               'rl.on("line", (line) => {',
               '  const trimmed = line.trim();',
@@ -623,16 +742,14 @@ jobs:
               '    return;',
               '  }',
               '  const eventType = typeof event?.type === "string" ? event.type : "";',
-              '  if (!eventType.includes("agent_message")) {',
+              '  const item = event?.item;',
+              '  if (eventType.startsWith("item.") && item && typeof item === "object") {',
+              '    handleItemEvent(eventType, item);',
               '    return;',
               '  }',
-              '  const text = extractText(event);',
-              '  if (!text) return;',
-              '  if (!wrotePlan) {',
-              '    writeFile("task-plan.txt", text);',
-              '    wrotePlan = true;',
-              '  }',
-              '  writeFile("latest-status.txt", text);',
+              '  const fallbackText = extractText(event);',
+              '  if (!fallbackText) return;',
+              '  updateStatus(fallbackText);',
               '});',
             ].join("\n");
             const heartbeatScript = [
@@ -829,6 +946,20 @@ jobs:
             echo "config_path=$CODEX_HOME/config.toml"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Register repo-local ignores for runtime artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          exclude_file=".git/info/exclude"
+          touch "$exclude_file"
+          # Keep workflow-local junk out of git status/add without mutating the
+          # repository's tracked .gitignore policy.
+          for pattern in ".codex" ".codex/" "__pycache__/" "*.py[cod]"; do
+            if ! grep -qxF "$pattern" "$exclude_file"; then
+              printf '%s\n' "$pattern" >> "$exclude_file"
+            fi
+          done
+
       - id: run_codex
         name: Run Codex
         continue-on-error: true
@@ -850,6 +981,7 @@ jobs:
           COMMAND_TEXT: ${{ needs.prepare.outputs.command_text }}
           STARTED_AT_MS: ${{ steps.create_progress_comment.outputs.started_at_ms }}
           GITHUB_TOKEN: ${{ github.token }}
+          PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -euo pipefail
           mkdir -p "$PROGRESS_STATE_DIR"
@@ -933,7 +1065,7 @@ jobs:
         run: |
           set -euo pipefail
           delimiter="CODEX_FILES_$(date +%s%N)"
-          tracked_changes="$(git status --short -- . ':(exclude).codex' ':(exclude).codex/**')"
+          tracked_changes="$(git status --short)"
           if [[ -n "$tracked_changes" ]]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             {
@@ -1047,12 +1179,7 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Codex may materialize a repo-local .codex artifact in CI; keep that as
-          # runner state unless a future workflow explicitly decides to track it.
-          if [[ -e ".codex" ]]; then
-            rm -rf ".codex"
-          fi
-          git add -A -- . ':(exclude).codex' ':(exclude).codex/**'
+          git add -A
           git commit -m "$commit_message"
           git push origin "HEAD:${PUSH_REF}"
           echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
