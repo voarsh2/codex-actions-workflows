@@ -634,7 +634,7 @@ jobs:
               '  }',
               '  writeFile("latest-status.txt", text);',
               '});',
-            ].join("\\n");
+            ].join("\n");
             const heartbeatScript = [
               'const fs = require("fs");',
               '',
@@ -715,7 +715,7 @@ jobs:
               '  console.error(error?.message || String(error));',
               '  process.exitCode = 1;',
               '});',
-            ].join("\\n");
+            ].join("\n");
             fs.writeFileSync(promptPath, prompt);
             fs.writeFileSync(outputSchemaPath, JSON.stringify(outputSchema, null, 2));
             fs.mkdirSync(progressStateDir, { recursive: true });
@@ -861,7 +861,7 @@ jobs:
           (
             while [[ ! -f "$heartbeat_stop" ]]; do
               node "$PROGRESS_HEARTBEAT_SCRIPT_PATH" || true
-              sleep 30
+              sleep 5
             done
           ) &
           heartbeat_pid=$!
@@ -1138,7 +1138,7 @@ jobs:
           set -euo pipefail
           status="success"
 
-          if [[ -n "$COMMIT_OUTCOME" && "$COMMIT_OUTCOME" != "success" ]]; then
+          if [[ "$COMMIT_OUTCOME" == "failure" || "$COMMIT_OUTCOME" == "cancelled" ]]; then
             status="push_failed"
           elif [[ "$MODE" == "issue" && "$CHANGED" == "true" && -n "$PR_ERROR" ]]; then
             status="pr_failed"
