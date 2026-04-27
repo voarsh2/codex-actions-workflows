@@ -115,4 +115,8 @@ The example workflow handles both normal issue comments and PR comments through 
 - Human comments are included by default; bot comments are only re-ingested if they contain this workflow's hidden marker.
 - Historical human comments have leading `@codex` or `/codex` summon syntax stripped before they are added to prompt context.
 - Codex returns structured output so the workflow can use a model-authored commit subject while still owning `git commit` and `git push`.
+- Each run creates one progress comment that the workflow updates in place until the final result replaces it.
+- While `codex exec` is running, the workflow can harvest agent-emitted updates from `codex exec --json` and surface the latest plan or status in that per-run progress comment.
+- Final result comments include workflow metadata such as duration and a run link.
+- Codex can optionally return a short `task_plan` in structured output for additional visibility, but the workflow still owns GitHub comment updates.
 - The workflow treats repo-local `.codex` artifacts as internal runner state and excludes them from change summaries and persistence.
