@@ -115,3 +115,4 @@ The example workflow handles both normal issue comments and PR comments through 
 - Human comments are included by default; bot comments are only re-ingested if they contain this workflow's hidden marker.
 - Historical human comments have leading `@codex` or `/codex` summon syntax stripped before they are added to prompt context.
 - Codex returns structured output so the workflow can use a model-authored commit subject while still owning `git commit` and `git push`.
+- The workflow treats repo-local `.codex` artifacts as internal runner state and excludes them from change summaries and persistence.

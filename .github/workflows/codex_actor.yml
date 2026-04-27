@@ -517,7 +517,7 @@ jobs:
               "- Treat the triggering comment as the active instruction. Use the issue or pull request body and prior comments only as supporting context unless the triggering comment explicitly asks you to act on them.",
               "- Use the conversation history to honor prior decisions and context, but prioritize the current command if it conflicts.",
               "- Treat `.git/` contents and Codex actor control artifacts as internal workflow data, not user-facing project files.",
-              "- If you inspect the repository file list, prefer project files and ignore `.git/`, `codex-actor-prompt.md`, `codex-final-message.txt`, `codex-output-schema.json`, and similar runner scratch files.",
+              "- If you inspect the repository file list, prefer project files and ignore `.git/`, `.codex`, `codex-actor-prompt.md`, `codex-final-message.txt`, `codex-output-schema.json`, and similar runner scratch files.",
               "- Your final response must match the provided JSON schema exactly.",
               "- Set reply_markdown to a concise human-readable summary of the result.",
               "- Set change_summary to a short description of what changed, or 'No changes made.' if nothing changed.",
@@ -707,11 +707,12 @@ jobs:
         run: |
           set -euo pipefail
           delimiter="CODEX_FILES_$(date +%s%N)"
-          if [[ -n "$(git status --short)" ]]; then
+          tracked_changes="$(git status --short -- . ':(exclude).codex' ':(exclude).codex/**')"
+          if [[ -n "$tracked_changes" ]]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             {
               echo "changed_files<<$delimiter"
-              git status --short
+              printf '%s\n' "$tracked_changes"
               echo "$delimiter"
             } >> "$GITHUB_OUTPUT"
           else
@@ -796,7 +797,12 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          # Codex may materialize a repo-local .codex artifact in CI; keep that as
+          # runner state unless a future workflow explicitly decides to track it.
+          if [[ -e ".codex" ]]; then
+            rm -rf ".codex"
+          fi
+          git add -A -- . ':(exclude).codex' ':(exclude).codex/**'
           git commit -m "$commit_message"
           git push origin "HEAD:${PUSH_REF}"
           echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
