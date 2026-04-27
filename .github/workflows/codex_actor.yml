@@ -578,6 +578,20 @@ jobs:
               body,
             });
 
+      - name: Prepare Linux sandbox prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The previous workaround used Codex's deprecated legacy Landlock path.
+          # OpenAI's official codex-action instead prepares hosted Linux runners
+          # for the modern bubblewrap sandbox by enabling user namespaces and
+          # clearing Ubuntu's AppArmor gate when that knob exists.
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -618,7 +632,6 @@ jobs:
             printf 'remote_connections = false\n'
             printf 'apps = false\n'
             printf 'apps_mcp_gateway = false\n\n'
-            printf 'use_legacy_landlock = true\n\n'
             printf '[model_providers.%s]\n' "$MODEL_PROVIDER"
             printf 'name = "OpenAI"\n'
             printf 'base_url = "%s"\n' "$CODEX_BASE_URL"

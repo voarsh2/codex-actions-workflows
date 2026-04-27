@@ -110,7 +110,7 @@ The example workflow handles both normal issue comments and PR comments through 
 - Fork PRs get a safe refusal comment instead of an unreliable push attempt.
 - Issue-triggered runs reuse `codex/issue-<number>` by default so repeated commands do not create duplicate PRs.
 - The workflow writes a minimal temporary `config.toml` for `codex exec` at runtime instead of relying on `openai/codex-action`.
-- The generated runtime config enables Codex's legacy Landlock sandbox backend on Linux runners. This avoids the common GitHub-hosted `bubblewrap` namespace failure without dropping to unrestricted execution.
+- On Linux runners, the workflow prepares the modern Codex sandbox path by enabling unprivileged user namespaces and clearing Ubuntu's AppArmor user-namespace restriction when present. This follows the same general hosted-runner fix used by `openai/codex-action` and avoids relying on Codex's deprecated legacy Landlock fallback.
 - Prompt context includes bounded prior conversation history.
 - Human comments are included by default; bot comments are only re-ingested if they contain this workflow's hidden marker.
 - Historical human comments have leading `@codex` or `/codex` summon syntax stripped before they are added to prompt context.
