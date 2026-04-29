@@ -291,7 +291,7 @@ jobs:
               commandText,
               "```",
               "",
-              "Agent plan:",
+              "Task checklist:",
               "_Waiting for Codex to emit its first progress update._",
             ].join("\n");
 
@@ -534,6 +534,7 @@ jobs:
               "- Treat `.git/` contents and Codex actor control artifacts as internal workflow data, not user-facing project files.",
               "- If you inspect the repository file list, prefer project files and ignore `.git/`, `.codex`, `codex-actor-prompt.md`, `codex-final-message.txt`, `codex-output-schema.json`, and similar runner scratch files.",
               "- Before making meaningful changes, emit a short user-facing progress update with a brief task list or plan.",
+              "- For multi-step work, keep Codex's internal task checklist or plan updated so the GitHub progress comment can reflect it accurately.",
               "- During the run, emit concise user-facing progress updates when you start or finish a substantial step. These updates may be surfaced in the GitHub progress comment while you work.",
               "- Your final response must match the provided JSON schema exactly.",
               "- Set task_plan to a short ordered list of the main steps you intended to take. Use 1 to 4 concise items, or an empty list if no meaningful plan was needed.",
@@ -652,6 +653,13 @@ jobs:
               '  return true;',
               '}',
               '',
+              'function updateChecklist(text) {',
+              '  const normalized = normalizeText(text);',
+              '  if (!normalized) return false;',
+              '  writeFileIfChanged("task-checklist.txt", `${normalized}\\n`);',
+              '  return true;',
+              '}',
+              '',
               'function updateStatus(text) {',
               '  const normalized = normalizeText(text);',
               '  if (!normalized) return;',
@@ -711,8 +719,8 @@ jobs:
               '  if (!itemType) return;',
               '  if (itemType === "todo_list") {',
               '    const plan = summarizeTodoList(item);',
-              '    if (updatePlan(plan)) {',
-              '      updateStatus("Updated task plan.");',
+              '    if (updateChecklist(plan)) {',
+              '      updateStatus("Updated task checklist.");',
               '      updatePhase("Planning work");',
               '    }',
               '    return;',
@@ -751,7 +759,8 @@ jobs:
               '    updateStatus(structured?.status || summary);',
               '    try {',
               '      const existingPlan = normalizeText(fs.readFileSync(`${stateDir}/task-plan.txt`, "utf8"));',
-              '      if (!existingPlan) updatePlan(structured?.plan || summary);',
+              '      const existingChecklist = normalizeText(fs.readFileSync(`${stateDir}/task-checklist.txt`, "utf8"));',
+              '      if (!existingPlan && !existingChecklist) updatePlan(structured?.plan || summary);',
               '    } catch {',
               '      updatePlan(structured?.plan || summary);',
               '    }',
@@ -810,6 +819,7 @@ jobs:
               '    return;',
               '  }',
               '  const phase = readOptional("phase.txt", "Running Codex");',
+              '  const taskChecklist = readOptional("task-checklist.txt", "");',
               '  const taskPlan = readOptional("task-plan.txt", "");',
               '  const latestStatus = readOptional("latest-status.txt", "Waiting for the next Codex progress update.");',
               '  const startedAtMs = Number(STARTED_AT_MS || "0");',
@@ -830,7 +840,11 @@ jobs:
               '    COMMAND_TEXT || "",',
               '    "```",',
               '  ];',
-              '  if (taskPlan) {',
+              '  if (taskChecklist) {',
+              '    parts.push("");',
+              '    parts.push("Task checklist:");',
+              '    parts.push(taskChecklist);',
+              '  } else if (taskPlan) {',
               '    parts.push("");',
               '    parts.push("Agent plan:");',
               '    parts.push(taskPlan);',
@@ -1017,6 +1031,7 @@ jobs:
           printf '%s\n' 'Running Codex' > "$PROGRESS_STATE_DIR/phase.txt"
           printf '%s\n' 'Waiting for the first Codex progress update.' > "$PROGRESS_STATE_DIR/latest-status.txt"
           : > "$PROGRESS_STATE_DIR/task-plan.txt"
+          : > "$PROGRESS_STATE_DIR/task-checklist.txt"
           heartbeat_stop="$PROGRESS_STATE_DIR/heartbeat-stop"
           rm -f "$heartbeat_stop"
           (
@@ -1074,9 +1089,8 @@ jobs:
                   .join("\n");
 
                 finalMessage = [
-                  replyMarkdown || "No summary returned.",
+                  replyMarkdown || changeSummary || "No summary returned.",
                   "",
-                  `Summary: ${changeSummary || "No summary returned."}`,
                   `Tests/checks: ${testsRun || "Not run."}`,
                 ].join("\n");
               } catch {
@@ -1148,6 +1162,7 @@ jobs:
                 return fallback;
               }
             };
+            const taskChecklist = readStateFile("task-checklist.txt", "");
             const taskPlan = readStateFile("task-plan.txt", "");
             const latestStatus = readStateFile("latest-status.txt", "");
 
@@ -1173,7 +1188,11 @@ jobs:
               `Mode: \`${mode}\``,
               `Status: ${statusText}`,
             ];
-            if (taskPlan) {
+            if (taskChecklist) {
+              parts.push("");
+              parts.push("Task checklist:");
+              parts.push(taskChecklist);
+            } else if (taskPlan) {
               parts.push("");
               parts.push("Agent plan:");
               parts.push(taskPlan);
