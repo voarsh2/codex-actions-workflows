@@ -401,6 +401,29 @@ jobs:
             }
 
             function extractBotSummary(commentBody) {
+              const stateMatch = (commentBody || "").match(/<!--\s*codex-actor:state\s+([A-Za-z0-9+/=]+)\s*-->/i);
+              if (stateMatch) {
+                try {
+                  const decoded = Buffer.from(stateMatch[1], "base64").toString("utf8");
+                  const parsed = JSON.parse(decoded);
+                  const parts = [];
+                  if (typeof parsed.run_status === "string" && parsed.run_status) {
+                    parts.push(`Status: ${parsed.run_status}`);
+                  }
+                  if (typeof parsed.final_message === "string" && parsed.final_message.trim()) {
+                    parts.push(trimForPrompt(parsed.final_message));
+                  }
+                  if (typeof parsed.task_plan === "string" && parsed.task_plan.trim()) {
+                    parts.push(`Task plan:\n${trimForPrompt(parsed.task_plan)}`);
+                  }
+                  if (typeof parsed.changed === "boolean") {
+                    parts.push(`Changed files: ${parsed.changed ? "yes" : "no"}`);
+                  }
+                  if (parts.length > 0) {
+                    return parts.join("\n\n");
+                  }
+                } catch {}
+              }
               const withoutMarkers = (commentBody || "").replace(/<!--[\s\S]*?-->/g, "").trim();
               const summaryMatch = withoutMarkers.match(/Codex summary:\n([\s\S]*?)(?:\n\nTracked changes detected before persistence:|\n\nRequested command:|$)/i);
               if (summaryMatch) {
@@ -430,6 +453,18 @@ jobs:
               });
             }
 
+            async function loadTopLevelReviews() {
+              if (mode !== "pr") {
+                return [];
+              }
+              return github.paginate(github.rest.pulls.listReviews, {
+                owner,
+                repo,
+                pull_number: targetNumber,
+                per_page: 100,
+              });
+            }
+
             if (mode === "pr") {
               const { data: pull } = await github.rest.pulls.get({
                 owner,
@@ -448,9 +483,10 @@ jobs:
               body = issue.body || "";
             }
 
-            const [issueComments, reviewComments] = await Promise.all([
+            const [issueComments, reviewComments, topLevelReviews] = await Promise.all([
               loadIssueComments(),
               loadReviewComments(),
+              loadTopLevelReviews(),
             ]);
 
             const normalizedComments = [
@@ -471,6 +507,18 @@ jobs:
                 association: comment.author_association || "",
                 isBot: (comment.user?.type || "").toLowerCase() === "bot" || (comment.user?.login || "").endsWith("[bot]"),
                 body: comment.body || "",
+              })),
+              ...topLevelReviews.map((review) => ({
+                source: "pr review",
+                id: Number(review.id),
+                created_at: review.submitted_at || review.created_at || "",
+                author: review.user?.login || "unknown",
+                association: review.author_association || "",
+                isBot: (review.user?.type || "").toLowerCase() === "bot" || (review.user?.login || "").endsWith("[bot]"),
+                body: [
+                  review.state ? `Review state: ${review.state}` : "",
+                  review.body || "",
+                ].filter(Boolean).join("\n\n") || "(empty review)",
               })),
             ]
               .filter((comment) => comment.id !== currentCommentId)
@@ -1498,7 +1546,14 @@ jobs:
               parts.push(changedFiles);
               parts.push("```");
 
-              body = `${marker}\n${parts.join("\n")}`;
+              const statePayload = {
+                run_status: runStatus || "unknown",
+                final_message: finalMessage || "",
+                task_plan: taskPlan || "",
+                changed,
+              };
+              const stateMarker = `<!-- codex-actor:state ${Buffer.from(JSON.stringify(statePayload), "utf8").toString("base64")} -->`;
+              body = `${marker}\n${stateMarker}\n${parts.join("\n")}`;
             }
 
             if (trackingCommentId > 0) {
