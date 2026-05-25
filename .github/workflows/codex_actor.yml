@@ -247,11 +247,7 @@ jobs:
       pull-requests: write
     outputs:
       run_status: ${{ steps.status.outputs.run_status }}
-      final_message: ${{ steps.capture_codex.outputs.final_message }}
-      commit_message: ${{ steps.capture_codex.outputs.commit_message }}
-      task_plan: ${{ steps.capture_codex.outputs.task_plan }}
       changed: ${{ steps.scan_changes.outputs.changed }}
-      changed_files: ${{ steps.scan_changes.outputs.changed_files }}
       commit_sha: ${{ steps.commit_push.outputs.commit_sha }}
       pr_url: ${{ steps.ensure_issue_pr.outputs.pr_url }}
       pr_number: ${{ steps.ensure_issue_pr.outputs.pr_number }}
@@ -1422,6 +1418,82 @@ jobs:
           echo "Actor run ended with status: ${{ steps.status.outputs.run_status }}"
           exit 1
 
+      - id: build_reply_payload
+        name: Build reply payload
+        if: always()
+        uses: actions/github-script@v8
+        env:
+          FINAL_MESSAGE_PATH: ${{ steps.prompt.outputs.final_message_path }}
+          RUN_STATUS: ${{ steps.status.outputs.run_status }}
+          CHANGED: ${{ steps.scan_changes.outputs.changed }}
+          CHANGED_FILES: ${{ steps.scan_changes.outputs.changed_files }}
+          COMMIT_SHA: ${{ steps.commit_push.outputs.commit_sha }}
+          PR_URL: ${{ steps.ensure_issue_pr.outputs.pr_url }}
+          PR_NUMBER: ${{ steps.ensure_issue_pr.outputs.pr_number }}
+          PR_ERROR: ${{ steps.ensure_issue_pr.outputs.pr_error }}
+          REPLY_PAYLOAD_PATH: ${{ runner.temp }}/codex-actor/reply-payload.json
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+
+            const finalMessagePath = process.env.FINAL_MESSAGE_PATH || "";
+            const payloadPath = process.env.REPLY_PAYLOAD_PATH || "";
+            let finalMessage = "";
+            let taskPlan = "";
+
+            if (finalMessagePath && fs.existsSync(finalMessagePath)) {
+              const raw = fs.readFileSync(finalMessagePath, "utf8");
+              try {
+                const parsed = JSON.parse(raw);
+                const rawTaskPlan = Array.isArray(parsed.task_plan) ? parsed.task_plan : [];
+                const replyMarkdown = typeof parsed.reply_markdown === "string" ? parsed.reply_markdown.trim() : "";
+                const changeSummary = typeof parsed.change_summary === "string" ? parsed.change_summary.trim() : "";
+                const testsRun = typeof parsed.tests_run === "string" ? parsed.tests_run.trim() : "";
+                finalMessage = [
+                  replyMarkdown || changeSummary || "No summary returned.",
+                  "",
+                  `Tests/checks: ${testsRun || "Not run."}`,
+                ].join("\n");
+                taskPlan = rawTaskPlan
+                  .map((item) => typeof item === "string" ? item.trim() : "")
+                  .filter(Boolean)
+                  .slice(0, 4)
+                  .map((item, index) => `${index + 1}. ${item}`)
+                  .join("\n");
+              } catch {
+                finalMessage = raw;
+              }
+            }
+
+            if (!payloadPath) {
+              core.setFailed("Reply payload path was not provided.");
+              return;
+            }
+
+            fs.mkdirSync(path.dirname(payloadPath), { recursive: true });
+            fs.writeFileSync(payloadPath, JSON.stringify({
+              run_status: process.env.RUN_STATUS || "",
+              final_message: finalMessage,
+              task_plan: taskPlan,
+              changed: process.env.CHANGED === "true",
+              changed_files: process.env.CHANGED_FILES || "No tracked changes.",
+              commit_sha: process.env.COMMIT_SHA || "",
+              pr_url: process.env.PR_URL || "",
+              pr_number: process.env.PR_NUMBER || "",
+              pr_error: process.env.PR_ERROR || "",
+            }, null, 2));
+            core.setOutput("reply_payload_path", payloadPath);
+
+      - name: Upload reply payload
+        if: always() && needs.prepare.outputs.should_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-reply-payload
+          path: ${{ steps.build_reply_payload.outputs.reply_payload_path }}
+          if-no-files-found: error
+
   reply:
     runs-on: ubuntu-latest
     needs:
@@ -1432,6 +1504,14 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+      - name: Download reply payload
+        if: needs.prepare.outputs.should_run == 'true'
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: codex-reply-payload
+          path: ${{ runner.temp }}/codex-actor-reply
+
       - name: Post result comment
         uses: actions/github-script@v8
         env:
@@ -1443,14 +1523,11 @@ jobs:
           SKIP_REASON: ${{ needs.prepare.outputs.skip_reason }}
           COMMAND_TEXT: ${{ needs.prepare.outputs.command_text }}
           RUN_STATUS: ${{ needs.act.outputs.run_status }}
-          FINAL_MESSAGE: ${{ needs.act.outputs.final_message }}
           CHANGED: ${{ needs.act.outputs.changed }}
-          CHANGED_FILES: ${{ needs.act.outputs.changed_files }}
           COMMIT_SHA: ${{ needs.act.outputs.commit_sha }}
           PR_URL: ${{ needs.act.outputs.pr_url }}
           PR_NUMBER: ${{ needs.act.outputs.pr_number }}
           PR_ERROR: ${{ needs.act.outputs.pr_error }}
-          TASK_PLAN: ${{ needs.act.outputs.task_plan }}
           TRACKING_COMMENT_ID: ${{ needs.act.outputs.tracking_comment_id }}
           STARTED_AT_MS: ${{ needs.act.outputs.started_at_ms }}
           SERVER_URL: ${{ github.server_url }}
@@ -1458,9 +1535,11 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           DRY_RUN: ${{ inputs.dry_run }}
+          REPLY_PAYLOAD_PATH: ${{ runner.temp }}/codex-actor-reply/reply-payload.json
         with:
           github-token: ${{ github.token }}
           script: |
+            const fs = require("fs");
             const owner = process.env.OWNER;
             const repo = process.env.REPO;
             const actor = process.env.ACTOR;
@@ -1468,15 +1547,7 @@ jobs:
             const mode = process.env.MODE;
             const skipReason = process.env.SKIP_REASON;
             const commandText = process.env.COMMAND_TEXT || "";
-            const runStatus = process.env.RUN_STATUS || "";
-            const finalMessage = process.env.FINAL_MESSAGE || "";
-            const changed = process.env.CHANGED === "true";
-            const changedFiles = process.env.CHANGED_FILES || "No tracked changes.";
-            const commitSha = process.env.COMMIT_SHA || "";
-            const prUrl = process.env.PR_URL || "";
-            const prNumber = process.env.PR_NUMBER || "";
-            const prError = process.env.PR_ERROR || "";
-            const taskPlan = process.env.TASK_PLAN || "";
+            const replyPayloadPath = process.env.REPLY_PAYLOAD_PATH || "";
             const trackingCommentId = Number(process.env.TRACKING_COMMENT_ID || "0");
             const startedAtMs = Number(process.env.STARTED_AT_MS || "0");
             const serverUrl = process.env.SERVER_URL || "https://github.com";
@@ -1484,6 +1555,23 @@ jobs:
             const runId = process.env.RUN_ID || "";
             const runAttempt = process.env.RUN_ATTEMPT || "";
             const dryRun = process.env.DRY_RUN === "true";
+            let replyPayload = {};
+            if (replyPayloadPath && fs.existsSync(replyPayloadPath)) {
+              try {
+                replyPayload = JSON.parse(fs.readFileSync(replyPayloadPath, "utf8"));
+              } catch {}
+            }
+            const runStatus = process.env.RUN_STATUS || replyPayload.run_status || "";
+            const finalMessage = typeof replyPayload.final_message === "string" ? replyPayload.final_message : "";
+            const changed = typeof replyPayload.changed === "boolean" ? replyPayload.changed : process.env.CHANGED === "true";
+            const changedFiles = typeof replyPayload.changed_files === "string" && replyPayload.changed_files
+              ? replyPayload.changed_files
+              : "No tracked changes.";
+            const commitSha = typeof replyPayload.commit_sha === "string" ? replyPayload.commit_sha : (process.env.COMMIT_SHA || "");
+            const prUrl = typeof replyPayload.pr_url === "string" ? replyPayload.pr_url : (process.env.PR_URL || "");
+            const prNumber = typeof replyPayload.pr_number === "string" ? replyPayload.pr_number : (process.env.PR_NUMBER || "");
+            const prError = typeof replyPayload.pr_error === "string" ? replyPayload.pr_error : (process.env.PR_ERROR || "");
+            const taskPlan = typeof replyPayload.task_plan === "string" ? replyPayload.task_plan : "";
             const marker = `<!-- codex-actor:reply mode=${mode} status=${runStatus || "unknown"} -->`;
             const runUrl = runId ? `${serverUrl}/${repository}/actions/runs/${runId}` : "";
             const commitUrl = commitSha ? `${serverUrl}/${repository}/commit/${commitSha}` : "";
