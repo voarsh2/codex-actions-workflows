@@ -24,6 +24,7 @@ The reusable workflow expects these secret names in the target project:
 
 - `CODEX_API_KEY`: bearer key for your Claw Bay or other Responses-compatible endpoint.
 - `CODEX_BASE_URL`: preferred provider base URL, for example `https://api.example.com/backend-api/codex`.
+- `CODEX_MCP_CONFIG_TOML` (optional): raw TOML appended to the runtime Codex `config.toml` for MCP server definitions.
 
 Use repository secrets or environment secrets in the caller repo. The reusable workflow reads `${{ secrets.* }}` from the calling workflow context.
 
@@ -97,6 +98,7 @@ If you want a more literal copy-paste starting point, use [`examples/use-in-your
 2. In the target repo, add repository or environment secrets:
    - `CODEX_API_KEY`
    - `CODEX_BASE_URL`
+   - `CODEX_MCP_CONFIG_TOML` if you want repo-specific MCP servers
 3. Copy [`examples/use-in-your-repo.issue_comment.yml`](./examples/use-in-your-repo.issue_comment.yml) into the target repo as `.github/workflows/codex.yml`.
 4. Replace the `uses:` line with your actual reusable workflow repo and ref.
 5. Commit the workflow in the target repo.
@@ -110,6 +112,7 @@ The example workflow handles both normal issue comments and PR comments through 
 - Fork PRs get a safe refusal comment instead of an unreliable push attempt.
 - Issue-triggered runs reuse `codex/issue-<number>` by default so repeated commands do not create duplicate PRs.
 - The workflow writes a minimal temporary `config.toml` for `codex exec` at runtime instead of relying on `openai/codex-action`.
+- If `CODEX_MCP_CONFIG_TOML` is provided by the caller repo, the workflow appends it verbatim to that temporary `config.toml` and enables remote MCP connections for the run.
 - On Linux runners, the workflow prepares the modern Codex sandbox path by enabling unprivileged user namespaces and clearing Ubuntu's AppArmor user-namespace restriction when present. This follows the same general hosted-runner fix used by `openai/codex-action` and avoids relying on Codex's deprecated legacy Landlock fallback.
 - Prompt context includes bounded prior conversation history.
 - Human comments are included by default; bot comments are only re-ingested if they contain this workflow's hidden marker.
@@ -122,3 +125,16 @@ The example workflow handles both normal issue comments and PR comments through 
 - Final result comments include workflow metadata such as duration and a run link.
 - Codex can optionally return a short structured `task_plan` as a fallback or final plan summary, but the workflow still owns GitHub comment updates.
 - The workflow registers repo-local runtime artifacts such as `.codex` and Python bytecode caches in `.git/info/exclude` so normal `git status` and `git add` honor the repository's own ignore rules plus workflow-local junk without mutating tracked `.gitignore` files.
+
+## Optional MCP secret example
+
+Store the following as the caller repo's `CODEX_MCP_CONFIG_TOML` secret instead of committing it to the reusable workflow:
+
+```toml
+[mcp_servers.memory]
+enabled = true
+url = "https://core.hosttweb.com/api/v1/mcp?source=codex"
+http_headers = { "Authorization" = "Bearer <rotate-me>" }
+```
+
+If the remote MCP supports a safer environment-variable-based auth option, prefer that over embedding a bearer token directly in the TOML block.

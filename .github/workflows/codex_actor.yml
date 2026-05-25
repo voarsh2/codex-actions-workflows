@@ -89,6 +89,8 @@ on:
         required: true
       codex_base_url:
         required: true
+      codex_mcp_config_toml:
+        required: false
 
 jobs:
   prepare:
@@ -1034,6 +1036,7 @@ jobs:
         env:
           CODEX_API_KEY: ${{ secrets.codex_api_key }}
           CODEX_BASE_URL: ${{ steps.resolve_provider.outputs.base_url }}
+          CODEX_MCP_CONFIG_TOML: ${{ secrets.codex_mcp_config_toml }}
           MODEL_PROVIDER: ${{ steps.resolve_provider.outputs.provider_name }}
           MODEL: ${{ inputs.model }}
           EFFORT: ${{ inputs.effort }}
@@ -1042,6 +1045,10 @@ jobs:
           export CODEX_HOME="$RUNNER_TEMP/codex-home"
           mkdir -p "$CODEX_HOME"
           echo "::add-mask::$CODEX_API_KEY"
+          remote_connections=false
+          if [[ -n "${CODEX_MCP_CONFIG_TOML:-}" ]]; then
+            remote_connections=true
+          fi
           {
             printf 'model_provider = "%s"\n' "$MODEL_PROVIDER"
             printf 'model = "%s"\n' "$MODEL"
@@ -1050,7 +1057,7 @@ jobs:
             printf '[features]\n'
             printf 'multi_agent = false\n'
             printf 'guardian_approval = false\n'
-            printf 'remote_connections = false\n'
+            printf 'remote_connections = %s\n' "$remote_connections"
             printf 'apps = false\n'
             printf 'apps_mcp_gateway = false\n\n'
             printf '[model_providers.%s]\n' "$MODEL_PROVIDER"
@@ -1060,6 +1067,9 @@ jobs:
             printf 'requires_openai_auth = false\n'
             printf 'experimental_bearer_token = "%s"\n' "$CODEX_API_KEY"
           } > "$CODEX_HOME/config.toml"
+          if [[ -n "${CODEX_MCP_CONFIG_TOML:-}" ]]; then
+            printf '\n%s\n' "$CODEX_MCP_CONFIG_TOML" >> "$CODEX_HOME/config.toml"
+          fi
           {
             echo "codex_home=$CODEX_HOME"
             echo "config_path=$CODEX_HOME/config.toml"
