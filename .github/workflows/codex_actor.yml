@@ -786,24 +786,6 @@ jobs:
               '  return target ? `Calling tool: ${target}` : "";',
               '}',
               '',
-              'function summarizeMcpListTools(item) {',
-              '  const server = normalizeText(item?.server || item?.server_name || item?.name || "");',
-              '  const toolArrays = [',
-              '    Array.isArray(item?.tools) ? item.tools : [],',
-              '    Array.isArray(item?.available_tools) ? item.available_tools : [],',
-              '    Array.isArray(item?.result?.tools) ? item.result.tools : [],',
-              '  ];',
-              '  const tools = toolArrays.flat();',
-              '  const toolNames = tools',
-              '    .map((tool) => normalizeText(tool?.name || tool?.tool_name || tool?.id || ""))',
-              '    .filter(Boolean);',
-              '  const prefix = server ? `Loaded MCP tools from ${server}` : "Loaded MCP tools";',
-              '  if (toolNames.length === 0) return prefix;',
-              '  const preview = toolNames.slice(0, 3).join(", ");',
-              '  const suffix = toolNames.length > 3 ? `, +${toolNames.length - 3} more` : "";',
-              '  return `${prefix}: ${preview}${suffix}`;',
-              '}',
-              '',
               'function handleItemEvent(eventType, item) {',
               '  const itemType = String(item?.type || "").trim();',
               '  if (!itemType) return;',
@@ -829,14 +811,7 @@ jobs:
               '    updatePhase("Editing repository files");',
               '    return;',
               '  }',
-              '  if (itemType === "mcp_list_tools") {',
-              '    const summary = summarizeMcpListTools(item);',
-              '    if (!summary) return;',
-              '    updateStatus(summary);',
-              '    updatePhase("Loading MCP tools");',
-              '    return;',
-              '  }',
-              '  if (itemType === "mcp_tool_call" || itemType === "mcp_call") {',
+              '  if (itemType === "mcp_tool_call") {',
               '    const summary = summarizeToolCall(item);',
               '    if (!summary) return;',
               '    updateStatus(summary);',
@@ -1096,132 +1071,6 @@ jobs:
             echo "config_path=$CODEX_HOME/config.toml"
           } >> "$GITHUB_OUTPUT"
 
-      - id: mcp_preflight
-        name: Inspect MCP configuration
-        if: always()
-        shell: bash
-        env:
-          CODEX_HOME: ${{ steps.write_config.outputs.codex_home }}
-          CONFIG_PATH: ${{ steps.write_config.outputs.config_path }}
-          PROGRESS_STATE_DIR: ${{ steps.prompt.outputs.progress_state_dir }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$PROGRESS_STATE_DIR"
-          printf '%s\n' 'Checking MCP configuration' > "$PROGRESS_STATE_DIR/phase.txt"
-          raw_list="$PROGRESS_STATE_DIR/mcp-list.raw.json"
-          raw_err="$PROGRESS_STATE_DIR/mcp-list.stderr.txt"
-          set +e
-          codex mcp list --json > "$raw_list" 2> "$raw_err"
-          list_status=$?
-          set -e
-          LIST_STATUS="$list_status" CONFIG_PATH="$CONFIG_PATH" PROGRESS_STATE_DIR="$PROGRESS_STATE_DIR" node <<'NODE'
-          const fs = require("fs");
-          const path = require("path");
-
-          const stateDir = process.env.PROGRESS_STATE_DIR || "";
-          const configPath = process.env.CONFIG_PATH || "";
-          const listStatus = Number(process.env.LIST_STATUS || "1");
-          const rawListPath = path.join(stateDir, "mcp-list.raw.json");
-          const rawErrPath = path.join(stateDir, "mcp-list.stderr.txt");
-          const summaryPath = path.join(stateDir, "mcp-preflight.txt");
-          const statusPath = path.join(stateDir, "mcp-preflight-status.txt");
-          const jsonPath = path.join(stateDir, "mcp-preflight.json");
-
-          const readOptional = (target) => {
-            try {
-              return fs.readFileSync(target, "utf8");
-            } catch {
-              return "";
-            }
-          };
-
-          const parseJsonFragment = (text) => {
-            const trimmed = String(text || "").trim();
-            if (!trimmed) return null;
-            try {
-              return JSON.parse(trimmed);
-            } catch {}
-            const arrayStart = trimmed.indexOf("[");
-            const arrayEnd = trimmed.lastIndexOf("]");
-            if (arrayStart >= 0 && arrayEnd > arrayStart) {
-              try {
-                return JSON.parse(trimmed.slice(arrayStart, arrayEnd + 1));
-              } catch {}
-            }
-            return null;
-          };
-
-          const configText = readOptional(configPath);
-          const serverNames = Array.from(configText.matchAll(/^\[mcp_servers\.([^\]\s]+)\]\s*$/gm)).map((match) => match[1]);
-          const remoteConnectionsMatch = configText.match(/^\s*remote_connections\s*=\s*(true|false)\s*$/m);
-          const rawListText = readOptional(rawListPath);
-          const rawErrText = readOptional(rawErrPath);
-          const parsedList = parseJsonFragment(rawListText);
-          const listEntries = Array.isArray(parsedList) ? parsedList : [];
-          const sanitizedEntries = listEntries.map((entry) => ({
-            name: String(entry?.name || ""),
-            enabled: Boolean(entry?.enabled),
-            disabled_reason: entry?.disabled_reason == null ? null : String(entry.disabled_reason),
-            transport_type: String(entry?.transport?.type || ""),
-            url: String(entry?.transport?.url || ""),
-            auth_status: String(entry?.auth_status || ""),
-          }));
-
-          const summaryLines = [
-            `Config path: ${configPath || "(missing)"}`,
-            `Config file present: ${configText ? "yes" : "no"}`,
-          ];
-          if (remoteConnectionsMatch) {
-            summaryLines.push(`features.remote_connections = ${remoteConnectionsMatch[1]}`);
-          }
-          summaryLines.push(`Configured MCP server blocks: ${serverNames.length > 0 ? serverNames.join(", ") : "none"}`);
-          summaryLines.push(`codex mcp list exit code: ${Number.isFinite(listStatus) ? listStatus : 1}`);
-
-          if (sanitizedEntries.length > 0) {
-            summaryLines.push("Codex MCP registry:");
-            for (const entry of sanitizedEntries) {
-              const details = [
-                entry.enabled ? "enabled" : "disabled",
-                entry.transport_type ? `transport=${entry.transport_type}` : "",
-                entry.auth_status ? `auth=${entry.auth_status}` : "",
-                entry.disabled_reason ? `reason=${entry.disabled_reason}` : "",
-                entry.url ? `url=${entry.url}` : "",
-              ].filter(Boolean).join("; ");
-              summaryLines.push(`- ${entry.name || "unnamed"}: ${details || "no details"}`);
-            }
-          } else {
-            summaryLines.push("Codex MCP registry: none");
-          }
-
-          const stderrLastLine = rawErrText.trim().split(/\r?\n/).filter(Boolean).slice(-1)[0] || "";
-          if (stderrLastLine) {
-            summaryLines.push(`CLI note: ${stderrLastLine}`);
-          }
-
-          let statusLine = "MCP preflight: no configured MCP servers detected.";
-          if (sanitizedEntries.length > 0) {
-            statusLine = `MCP preflight: ${sanitizedEntries.map((entry) => {
-              const state = entry.enabled ? "enabled" : "disabled";
-              const type = entry.transport_type ? ` (${entry.transport_type})` : "";
-              return `${entry.name || "unnamed"} ${state}${type}`;
-            }).join("; ")}.`;
-          } else if (serverNames.length > 0) {
-            statusLine = `MCP preflight: config contains ${serverNames.join(", ")}, but Codex reported no configured MCP servers.`;
-          }
-
-          fs.writeFileSync(summaryPath, `${summaryLines.join("\n")}\n`, "utf8");
-          fs.writeFileSync(statusPath, `${statusLine}\n`, "utf8");
-          fs.writeFileSync(jsonPath, JSON.stringify({
-            config_path: configPath,
-            config_present: Boolean(configText),
-            remote_connections: remoteConnectionsMatch ? remoteConnectionsMatch[1] === "true" : null,
-            configured_server_blocks: serverNames,
-            list_exit_code: Number.isFinite(listStatus) ? listStatus : 1,
-            servers: sanitizedEntries,
-            cli_note: stderrLastLine || "",
-          }, null, 2), "utf8");
-          NODE
-
       - name: Register repo-local ignores for runtime artifacts
         shell: bash
         run: |
@@ -1262,11 +1111,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$PROGRESS_STATE_DIR"
           printf '%s\n' 'Running Codex' > "$PROGRESS_STATE_DIR/phase.txt"
-          if [[ -s "$PROGRESS_STATE_DIR/mcp-preflight-status.txt" ]]; then
-            cat "$PROGRESS_STATE_DIR/mcp-preflight-status.txt" > "$PROGRESS_STATE_DIR/latest-status.txt"
-          else
-            printf '%s\n' 'Waiting for the first Codex progress update.' > "$PROGRESS_STATE_DIR/latest-status.txt"
-          fi
+          printf '%s\n' 'Waiting for the first Codex progress update.' > "$PROGRESS_STATE_DIR/latest-status.txt"
           : > "$PROGRESS_STATE_DIR/task-plan.txt"
           : > "$PROGRESS_STATE_DIR/task-checklist.txt"
           heartbeat_stop="$PROGRESS_STATE_DIR/heartbeat-stop"
@@ -1334,7 +1179,9 @@ jobs:
                 finalMessage = raw;
               }
             }
+            core.setOutput("final_message", finalMessage);
             core.setOutput("commit_message", commitMessage);
+            core.setOutput("task_plan", taskPlan);
 
       - id: scan_changes
         name: Scan working tree changes
@@ -1577,7 +1424,6 @@ jobs:
         uses: actions/github-script@v8
         env:
           FINAL_MESSAGE_PATH: ${{ steps.prompt.outputs.final_message_path }}
-          STATE_DIR: ${{ steps.prompt.outputs.progress_state_dir }}
           RUN_STATUS: ${{ steps.status.outputs.run_status }}
           CHANGED: ${{ steps.scan_changes.outputs.changed }}
           CHANGED_FILES: ${{ steps.scan_changes.outputs.changed_files }}
@@ -1593,11 +1439,9 @@ jobs:
             const path = require("path");
 
             const finalMessagePath = process.env.FINAL_MESSAGE_PATH || "";
-            const stateDir = process.env.STATE_DIR || "";
             const payloadPath = process.env.REPLY_PAYLOAD_PATH || "";
             let finalMessage = "";
             let taskPlan = "";
-            let mcpPreflight = "";
 
             if (finalMessagePath && fs.existsSync(finalMessagePath)) {
               const raw = fs.readFileSync(finalMessagePath, "utf8");
@@ -1622,11 +1466,6 @@ jobs:
                 finalMessage = raw;
               }
             }
-            if (stateDir) {
-              try {
-                mcpPreflight = fs.readFileSync(path.join(stateDir, "mcp-preflight.txt"), "utf8").trim();
-              } catch {}
-            }
 
             if (!payloadPath) {
               core.setFailed("Reply payload path was not provided.");
@@ -1638,7 +1477,6 @@ jobs:
               run_status: process.env.RUN_STATUS || "",
               final_message: finalMessage,
               task_plan: taskPlan,
-              mcp_preflight: mcpPreflight,
               changed: process.env.CHANGED === "true",
               changed_files: process.env.CHANGED_FILES || "No tracked changes.",
               commit_sha: process.env.COMMIT_SHA || "",
@@ -1734,7 +1572,6 @@ jobs:
             const prNumber = typeof replyPayload.pr_number === "string" ? replyPayload.pr_number : (process.env.PR_NUMBER || "");
             const prError = typeof replyPayload.pr_error === "string" ? replyPayload.pr_error : (process.env.PR_ERROR || "");
             const taskPlan = typeof replyPayload.task_plan === "string" ? replyPayload.task_plan : "";
-            const mcpPreflight = typeof replyPayload.mcp_preflight === "string" ? replyPayload.mcp_preflight : "";
             const marker = `<!-- codex-actor:reply mode=${mode} status=${runStatus || "unknown"} -->`;
             const runUrl = runId ? `${serverUrl}/${repository}/actions/runs/${runId}` : "";
             const commitUrl = commitSha ? `${serverUrl}/${repository}/commit/${commitSha}` : "";
@@ -1791,13 +1628,6 @@ jobs:
                 parts.push("");
                 parts.push("Task plan:");
                 parts.push(taskPlan);
-              }
-              if (mcpPreflight) {
-                parts.push("");
-                parts.push("MCP preflight:");
-                parts.push("```text");
-                parts.push(mcpPreflight);
-                parts.push("```");
               }
 
               parts.push("");
